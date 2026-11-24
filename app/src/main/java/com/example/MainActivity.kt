@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Assessment
 import androidx.compose.material.icons.outlined.Dashboard
@@ -134,7 +135,9 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             FrigStockTheme {
-                FrigStockAppShell(factory = viewModelFactory)
+                SelectionContainer {
+                    FrigStockAppShell(factory = viewModelFactory)
+                }
             }
         }
     }

@@ -8,6 +8,7 @@ import android.util.Log
 import com.example.data.DateUtils
 import com.example.data.InvoiceSourceType
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
@@ -76,6 +77,9 @@ class InvoiceAiExtractor {
 
     suspend fun extractFromImageUri(context: Context, imageUri: Uri): Result<ParsedInvoiceDraft> {
         return try {
+            if (!ensureFirebaseInitialized(context.applicationContext)) {
+                return Result.failure(IllegalStateException(MISSING_FIREBASE_CONFIG_MESSAGE))
+            }
             val bitmap = withContext(Dispatchers.IO) {
                 decodeAndScaleBitmap(context, imageUri, maxDimension = 1600)
             } ?: return Result.failure(IllegalArgumentException("Não foi possível abrir a imagem selecionada."))
@@ -104,6 +108,9 @@ class InvoiceAiExtractor {
 
     suspend fun extractFromPdfUri(context: Context, pdfUri: Uri): Result<ParsedInvoiceDraft> {
         return try {
+            if (!ensureFirebaseInitialized(context.applicationContext)) {
+                return Result.failure(IllegalStateException(MISSING_FIREBASE_CONFIG_MESSAGE))
+            }
             val pdfBytes = withContext(Dispatchers.IO) {
                 context.contentResolver.openInputStream(pdfUri)?.use { input ->
                     val buffer = ByteArrayOutputStream()
@@ -136,6 +143,26 @@ class InvoiceAiExtractor {
             Log.e(TAG, "AI PDF extraction failed", e)
             Result.failure(IllegalStateException("Falha ao ler PDF com IA: ${e.localizedMessage ?: "erro de conexão"}"))
         }
+    }
+
+    private fun ensureFirebaseInitialized(appContext: Context): Boolean {
+        return try {
+            if (FirebaseApp.getApps(appContext).isNotEmpty()) {
+                true
+            } else {
+                FirebaseApp.initializeApp(appContext) != null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize FirebaseApp", e)
+            false
+        }
+    }
+
+    private companion object {
+        const val MISSING_FIREBASE_CONFIG_MESSAGE =
+            "Firebase não está configurado neste APK (arquivo google-services.json ausente na compilação). " +
+                "Gere o APK pelo AI Studio ou adicione o google-services.json no repositório/Secrets do GitHub. " +
+                "As funções offline (XML NF-e, QR/Código DANFE e lançamento manual) continuam funcionando normalmente."
     }
 
     private fun buildPrompt(): String {

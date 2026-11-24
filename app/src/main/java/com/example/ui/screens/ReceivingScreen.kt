@@ -1,9 +1,12 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,12 +27,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.PhotoLibrary
@@ -526,8 +531,8 @@ fun ReceivingScreen(
     if (showPhotoSourceDialog) {
         AlertDialog(
             onDismissRequest = { showPhotoSourceDialog = false },
-            title = { Text("Selecionar Foto da Nota") },
-            text = { Text("A IA extrairá fornecedor, NF e cortes automaticamente para revisão.") },
+            title = { SelectionContainer { Text("Selecionar Foto da Nota") } },
+            text = { SelectionContainer { Text("A IA extrairá fornecedor, NF e cortes automaticamente para revisão.") } },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -695,6 +700,7 @@ private fun ExtractionBanner(
     state: ExtractionUiState,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     when (state) {
         ExtractionUiState.Idle -> Unit
         is ExtractionUiState.Loading -> {
@@ -729,6 +735,13 @@ private fun ExtractionBanner(
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.weight(1f)
                     )
+                    IconButton(onClick = { copyTextToClipboard(context, state.message) }) {
+                        Icon(
+                            Icons.Rounded.ContentCopy,
+                            contentDescription = "Copiar mensagem",
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                     IconButton(onClick = onDismiss) {
                         Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.cd_close))
                     }
@@ -752,6 +765,17 @@ private fun ExtractionBanner(
                         color = MaterialTheme.colorScheme.onErrorContainer,
                         modifier = Modifier.weight(1f)
                     )
+                    IconButton(
+                        onClick = { copyTextToClipboard(context, state.message) },
+                        modifier = Modifier.testTag("copy_extraction_error_button")
+                    ) {
+                        Icon(
+                            Icons.Rounded.ContentCopy,
+                            contentDescription = "Copiar mensagem de erro",
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                     IconButton(onClick = onDismiss) {
                         Icon(
                             Icons.Rounded.Close,
@@ -763,6 +787,12 @@ private fun ExtractionBanner(
             }
         }
     }
+}
+
+private fun copyTextToClipboard(context: Context, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+    clipboard.setPrimaryClip(ClipData.newPlainText("Amazonas Center", text))
+    Toast.makeText(context, "Mensagem copiada", Toast.LENGTH_SHORT).show()
 }
 
 private fun createInvoiceImageUri(context: Context): Uri {
