@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -64,6 +65,7 @@ import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
 import com.example.data.MeatType
 import com.example.data.TemperatureZone
+import com.example.data.ThermalCompliance
 import com.example.ui.components.ExpiryUrgencyBadge
 import com.example.ui.components.MeatTypePill
 import com.example.ui.components.StockOutSheet
@@ -71,6 +73,7 @@ import com.example.ui.components.TemperatureZonePill
 import com.example.ui.components.ThermalComplianceBadge
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.viewmodel.InventoryViewModel
+import com.example.ui.viewmodel.ReceivingViewModel
 import com.example.ui.viewmodel.UrgencyFilter
 import java.util.Locale
 
@@ -116,8 +119,10 @@ fun InventoryScreen(
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold
                     )
+                    val ptBr = Locale.forLanguageTag("pt-BR")
+                    val otherSuffix = if (state.totalFilteredOtherUnits > 0) " + ${state.totalFilteredOtherUnits} pç/cx" else ""
                     Text(
-                        text = "${state.filteredItems.size} lotes • ${String.format(Locale("pt", "BR"), "%.1f", state.totalFilteredKg)} kg",
+                        text = "${state.filteredItems.size} lotes • ${String.format(ptBr, "%.1f", state.totalFilteredKg)} kg$otherSuffix",
                         style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
                         color = MaterialTheme.colorScheme.secondary
                     )
@@ -126,7 +131,7 @@ fun InventoryScreen(
                 OutlinedTextField(
                     value = state.searchQuery,
                     onValueChange = viewModel::setSearchQuery,
-                    placeholder = { Text("Buscar corte, lote, NF, SIF ou fornecedor...") },
+                    placeholder = { Text("Buscar corte, lote, NF, SIF, câmara ou obs...") },
                     leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = stringResource(R.string.cd_search)) },
                     trailingIcon = {
                         if (state.searchQuery.isNotEmpty()) {
@@ -351,6 +356,7 @@ private fun ItemDetailSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val movements by viewModel.observeMovementsForItem(item.id).collectAsStateWithLifecycle(initialValue = emptyList())
     var showTransferMode by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
     var newZone by remember { mutableStateOf(item.zoneEnum) }
     var newChamber by remember { mutableStateOf(item.chamberName) }
     var newTempText by remember { mutableStateOf(String.format(Locale.US, "%.1f", item.measuredTempCelsius)) }
@@ -405,6 +411,7 @@ private fun ItemDetailSheet(
                     if (item.unitCostBrl > 0.0) {
                         DetailLine("Custo unitário", DateUtils.formatCurrencyBrl(item.unitCostBrl))
                     }
+                    if (item.notes.isNotBlank()) DetailLine("Observações", item.notes)
                 }
             }
 
@@ -437,12 +444,24 @@ private fun ItemDetailSheet(
                         )
                         OutlinedTextField(
                             value = newTempText,
-                            onValueChange = { newTempText = it },
+                            onValueChange = { newTempText = ReceivingViewModel.sanitizeTemperatureInput(it) },
                             label = { Text("Temperatura aferida (°C)") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            trailingIcon = {
+                                TextButton(onClick = { newTempText = ReceivingViewModel.toggleTemperatureSign(newTempText) }) {
+                                    Text("±", fontWeight = FontWeight.Bold)
+                                }
+                            },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
+                        newTempText.replace(',', '.').toDoubleOrNull()?.let { parsedTemp ->
+                            ThermalComplianceBadge(
+                                compliance = ThermalCompliance.evaluate(newZone, parsedTemp),
+                                tempCelsius = parsedTemp,
+                                showTempValue = false
+                            )
+                        }
                         Button(
                             onClick = {
                                 val t = newTempText.replace(',', '.').toDoubleOrNull() ?: newZone.defaultTempCelsius
@@ -513,10 +532,7 @@ private fun ItemDetailSheet(
             }
 
             TextButton(
-                onClick = {
-                    viewModel.deleteItem(item.id)
-                    onDismiss()
-                },
+                onClick = { showDeleteConfirm = true },
                 modifier = Modifier.align(Alignment.End)
             ) {
                 Icon(Icons.Rounded.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
@@ -525,6 +541,30 @@ private fun ItemDetailSheet(
             }
         }
         }
+    }
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("Excluir lote do estoque?") },
+            text = { Text("Esta ação removerá permanentemente ${item.cutName} da câmara fria.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteConfirm = false
+                        viewModel.deleteItem(item.id)
+                        onDismiss()
+                    }
+                ) {
+                    Text("Excluir", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
     }
 }
 

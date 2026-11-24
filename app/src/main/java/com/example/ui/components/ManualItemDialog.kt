@@ -46,6 +46,7 @@ import com.example.data.MeasurementUnit
 import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
 import com.example.domain.invoice.ParsedInvoiceItemDraft
+import com.example.ui.viewmodel.ReceivingViewModel
 import java.util.Locale
 import java.util.UUID
 
@@ -54,6 +55,7 @@ import java.util.UUID
 fun ManualItemSheet(
     initialItem: ParsedInvoiceItemDraft? = null,
     defaultZone: TemperatureZone = TemperatureZone.RESFRIADO,
+    sessionTempCelsius: Double? = null,
     onDismiss: () -> Unit,
     onSave: (ParsedInvoiceItemDraft) -> Unit
 ) {
@@ -63,11 +65,14 @@ fun ManualItemSheet(
     var cutName by remember { mutableStateOf(initialItem?.cutName ?: "") }
     var zone by remember { mutableStateOf(initialItem?.temperatureZone ?: defaultZone) }
     var tempText by remember {
+        val initialTemp = initialItem?.measuredTempCelsius
+            ?: sessionTempCelsius
+            ?: defaultZone.defaultTempCelsius
         mutableStateOf(
             String.format(
                 Locale.US,
                 "%.1f",
-                initialItem?.measuredTempCelsius ?: defaultZone.defaultTempCelsius
+                initialTemp
             )
         )
     }
@@ -95,6 +100,7 @@ fun ManualItemSheet(
     }
     var batchCode by remember { mutableStateOf(initialItem?.batchCode ?: "") }
     var sifCode by remember { mutableStateOf(initialItem?.sifCode ?: "") }
+    var notes by remember { mutableStateOf(initialItem?.notes ?: "") }
     var expiryEpochDay by remember {
         mutableLongStateOf(
             initialItem?.expiryEpochDay ?: DateUtils.addDaysToTodayEpochDay(
@@ -190,7 +196,12 @@ fun ManualItemSheet(
                         selected = zone == z,
                         onClick = {
                             zone = z
-                            tempText = String.format(Locale.US, "%.1f", z.defaultTempCelsius)
+                            val nextTemp = if (initialItem == null && z == defaultZone && sessionTempCelsius != null) {
+                                sessionTempCelsius
+                            } else {
+                                z.defaultTempCelsius
+                            }
+                            tempText = String.format(Locale.US, "%.1f", nextTemp)
                             chamberName = z.defaultChamber
                             if (initialItem == null) {
                                 val days = if (z == TemperatureZone.CONGELADO) {
@@ -213,12 +224,20 @@ fun ManualItemSheet(
             ) {
                 OutlinedTextField(
                     value = tempText,
-                    onValueChange = { tempText = it },
+                    onValueChange = { tempText = ReceivingViewModel.sanitizeTemperatureInput(it) },
                     label = { Text("Temp. (°C)") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    trailingIcon = {
+                        TextButton(
+                            onClick = { tempText = ReceivingViewModel.toggleTemperatureSign(tempText) },
+                            modifier = Modifier.testTag("manual_temp_sign_button")
+                        ) {
+                            Text("±", fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                     singleLine = true,
                     modifier = Modifier
-                        .weight(1f)
+                        .weight(1.1f)
                         .testTag("manual_temp_input")
                 )
                 OutlinedTextField(
@@ -227,7 +246,7 @@ fun ManualItemSheet(
                     label = { Text("Câmara / Local") },
                     singleLine = true,
                     modifier = Modifier
-                        .weight(1.6f)
+                        .weight(1.5f)
                         .testTag("manual_chamber_input")
                 )
             }
@@ -235,7 +254,8 @@ fun ManualItemSheet(
             tempText.replace(',', '.').toDoubleOrNull()?.let { parsedTemp ->
                 ThermalComplianceBadge(
                     compliance = ThermalCompliance.evaluate(zone, parsedTemp),
-                    tempCelsius = parsedTemp
+                    tempCelsius = parsedTemp,
+                    showTempValue = false
                 )
             }
 
@@ -333,6 +353,18 @@ fun ManualItemSheet(
                 )
             }
 
+            OutlinedTextField(
+                value = notes,
+                onValueChange = { notes = it },
+                label = { Text("Observações do lote (opcional)") },
+                placeholder = { Text("Ex.: Embalagem a vácuo íntegra, sem exudato...") },
+                minLines = 1,
+                maxLines = 3,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("manual_notes_input")
+            )
+
             if (errorMsg != null) {
                 Text(
                     text = errorMsg!!,
@@ -365,7 +397,7 @@ fun ManualItemSheet(
                                     batchCode = batchCode.trim(),
                                     sifCode = sifCode.trim(),
                                     expiryEpochDay = expiryEpochDay,
-                                    notes = initialItem?.notes ?: ""
+                                    notes = notes.trim()
                                 )
                             )
                         }

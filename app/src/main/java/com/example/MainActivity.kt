@@ -15,14 +15,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
+import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.outlined.Assessment
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Inventory2
-import androidx.compose.material.icons.outlined.ReceiptLong
 import androidx.compose.material.icons.rounded.Assessment
 import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.Inventory2
-import androidx.compose.material.icons.rounded.ReceiptLong
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -50,6 +50,7 @@ import com.example.ai.configureAppCheck
 import com.example.data.AppDatabase
 import com.example.data.ColdStorageRepository
 import com.example.domain.invoice.InvoiceAiExtractor
+import com.example.domain.invoice.InvoiceLocalExtractor
 import com.example.ui.screens.BarcodeScannerScreen
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.InventoryScreen
@@ -99,8 +100,8 @@ private val topDestinations = listOf(
     TopDestination(
         route = AppRoute.Receiving,
         labelRes = R.string.nav_receiving,
-        selectedIcon = Icons.Rounded.ReceiptLong,
-        unselectedIcon = Icons.Outlined.ReceiptLong,
+        selectedIcon = Icons.AutoMirrored.Rounded.ReceiptLong,
+        unselectedIcon = Icons.AutoMirrored.Outlined.ReceiptLong,
         testTag = "nav_receiving"
     ),
     TopDestination(
@@ -130,8 +131,9 @@ class MainActivity : ComponentActivity() {
 
         val database = AppDatabase.getInstance(applicationContext)
         val repository = ColdStorageRepository(database.coldStorageDao())
+        val localExtractor = InvoiceLocalExtractor()
         val aiExtractor = InvoiceAiExtractor()
-        val viewModelFactory = FrigStockViewModelFactory(repository, aiExtractor)
+        val viewModelFactory = FrigStockViewModelFactory(repository, localExtractor, aiExtractor)
 
         setContent {
             FrigStockTheme {
@@ -236,7 +238,10 @@ private fun FrigStockAppShell(factory: FrigStockViewModelFactory) {
                             DashboardScreen(
                                 viewModel = dashboardViewModel,
                                 onNavigateToReceiving = { navigateTopLevel(AppRoute.Receiving) },
-                                onNavigateToInventory = { navigateTopLevel(AppRoute.Inventory) }
+                                onNavigateToInventory = { urgencyFilter ->
+                                    inventoryViewModel.setUrgencyFilter(urgencyFilter)
+                                    navigateTopLevel(AppRoute.Inventory)
+                                }
                             )
                         }
                         composable<AppRoute.Receiving> {

@@ -20,11 +20,11 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.AcUnit
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowOutward
 import androidx.compose.material.icons.rounded.Inventory2
-import androidx.compose.material.icons.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.Thermostat
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Button
@@ -77,13 +77,14 @@ import com.example.ui.theme.StatusWarningAmberBg
 import com.example.ui.theme.StatusWarningAmberDarkBg
 import com.example.ui.viewmodel.ChamberSummary
 import com.example.ui.viewmodel.DashboardViewModel
+import com.example.ui.viewmodel.UrgencyFilter
 import java.util.Locale
 
 @Composable
 fun DashboardScreen(
     viewModel: DashboardViewModel,
     onNavigateToReceiving: () -> Unit,
-    onNavigateToInventory: () -> Unit,
+    onNavigateToInventory: (UrgencyFilter) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -131,14 +132,21 @@ fun DashboardScreen(
 
             if (state.chamberSummaries.isNotEmpty()) {
                 item {
-                    SectionTitle(title = "Zonas & Câmaras Ativas", actionLabel = "Ver tudo", onAction = onNavigateToInventory)
+                    SectionTitle(
+                        title = "Zonas & Câmaras Ativas",
+                        actionLabel = "Ver tudo",
+                        onAction = { onNavigateToInventory(UrgencyFilter.ALL) }
+                    )
                 }
                 item {
                     LazyRow(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         items(state.chamberSummaries, key = { it.chamberName }) { chamber ->
-                            ChamberSummaryCard(chamber = chamber, onClick = onNavigateToInventory)
+                            ChamberSummaryCard(
+                                chamber = chamber,
+                                onClick = { onNavigateToInventory(UrgencyFilter.ALL) }
+                            )
                         }
                     }
                 }
@@ -148,7 +156,7 @@ fun DashboardScreen(
                 SectionTitle(
                     title = "Prioridade FEFO (Próximos a Vencer)",
                     actionLabel = if (state.activeItems.isNotEmpty()) "Ver estoque" else null,
-                    onAction = onNavigateToInventory
+                    onAction = { onNavigateToInventory(UrgencyFilter.ALL) }
                 )
             }
 
@@ -274,7 +282,7 @@ private fun HeroColdHeader(
 
             Column {
                 Text(
-                    text = String.format(Locale("pt", "BR"), "%.2f kg", totalKg),
+                    text = String.format(Locale.forLanguageTag("pt-BR"), "%.2f kg", totalKg),
                     style = MaterialTheme.typography.displaySmall,
                     color = Color.White,
                     fontWeight = FontWeight.Bold
@@ -322,7 +330,7 @@ private fun FefoSummaryRow(
     expiredCount: Int,
     dueSoonCount: Int,
     onTrackCount: Int,
-    onCardClick: () -> Unit
+    onCardClick: (UrgencyFilter) -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
     Row(
@@ -334,7 +342,7 @@ private fun FefoSummaryRow(
             label = "Vencidos",
             bgColor = if (isDark) StatusDangerRedDarkBg else StatusDangerRedBg,
             accentColor = if (isDark) Color(0xFFFCA5A5) else StatusDangerRed,
-            onClick = onCardClick,
+            onClick = { onCardClick(UrgencyFilter.EXPIRED) },
             modifier = Modifier
                 .weight(1f)
                 .testTag("dashboard_expired_card")
@@ -344,7 +352,7 @@ private fun FefoSummaryRow(
             label = "Até 3 dias",
             bgColor = if (isDark) StatusWarningAmberDarkBg else StatusWarningAmberBg,
             accentColor = if (isDark) Color(0xFFFCD34D) else StatusWarningAmber,
-            onClick = onCardClick,
+            onClick = { onCardClick(UrgencyFilter.DUE_SOON) },
             modifier = Modifier
                 .weight(1f)
                 .testTag("dashboard_due_soon_card")
@@ -354,7 +362,7 @@ private fun FefoSummaryRow(
             label = "Em dia",
             bgColor = if (isDark) StatusOkGreenDarkBg else StatusOkGreenBg,
             accentColor = if (isDark) Color(0xFF86EFAC) else StatusOkGreen,
-            onClick = onCardClick,
+            onClick = { onCardClick(UrgencyFilter.ON_TRACK) },
             modifier = Modifier
                 .weight(1f)
                 .testTag("dashboard_ok_card")
@@ -429,8 +437,19 @@ private fun ChamberSummaryCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            val ptBr = Locale.forLanguageTag("pt-BR")
+            val stockText = buildString {
+                if (chamber.totalKg > 0.0 || chamber.totalOtherUnits == 0) {
+                    append("${String.format(ptBr, "%.1f", chamber.totalKg)} kg")
+                }
+                if (chamber.totalOtherUnits > 0) {
+                    if (isNotEmpty()) append(" + ")
+                    append("${chamber.totalOtherUnits} pç/cx")
+                }
+                append(" • ${chamber.lotCount} lotes")
+            }
             Text(
-                text = "${String.format(Locale("pt", "BR"), "%.1f", chamber.totalKg)} kg • ${chamber.lotCount} lotes",
+                text = stockText,
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -550,7 +569,7 @@ private fun EmptyColdStorageCard(onReceiveClick: () -> Unit) {
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "Inicie uma sessão de recebimento importando um XML NF-e, fotografando a nota fiscal com IA ou lançando manualmente seus cortes.",
+                text = "Inicie uma sessão de recebimento importando um XML NF-e, fotografando ou enviando o PDF da nota (leitura local offline) ou lançando manualmente seus cortes.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -561,7 +580,7 @@ private fun EmptyColdStorageCard(onReceiveClick: () -> Unit) {
                     .height(48.dp)
                     .testTag("empty_receive_button")
             ) {
-                Icon(Icons.Rounded.ReceiptLong, contentDescription = null)
+                Icon(Icons.AutoMirrored.Rounded.ReceiptLong, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text("Receber Mercadoria")
             }

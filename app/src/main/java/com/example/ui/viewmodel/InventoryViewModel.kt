@@ -6,6 +6,7 @@ import com.example.data.ColdStorageItemEntity
 import com.example.data.ColdStorageRepository
 import com.example.data.ExpiryUrgency
 import com.example.data.MeatType
+import com.example.data.MeasurementUnit
 import com.example.data.MovementType
 import com.example.data.StockMovementEntity
 import com.example.data.TemperatureZone
@@ -19,8 +20,9 @@ import kotlinx.coroutines.launch
 
 enum class UrgencyFilter(val label: String) {
     ALL("Todos"),
-    CRITICAL("Críticos ≤ 3d"),
-    EXPIRED("Vencidos")
+    DUE_SOON("Até 3 dias"),
+    EXPIRED("Vencidos"),
+    ON_TRACK("No prazo")
 }
 
 data class InventoryUiState(
@@ -30,6 +32,7 @@ data class InventoryUiState(
     val urgencyFilter: UrgencyFilter = UrgencyFilter.ALL,
     val filteredItems: List<ColdStorageItemEntity> = emptyList(),
     val totalFilteredKg: Double = 0.0,
+    val totalFilteredOtherUnits: Int = 0,
     val feedbackMessage: String? = null
 )
 
@@ -66,22 +69,28 @@ class InventoryViewModel(
                 item.batchCode.lowercase().contains(q) ||
                 item.supplierName.lowercase().contains(q) ||
                 item.invoiceNumber.lowercase().contains(q) ||
-                item.sifCode.lowercase().contains(q)
+                item.sifCode.lowercase().contains(q) ||
+                item.chamberName.lowercase().contains(q) ||
+                item.notes.lowercase().contains(q)
             val matchesMeat = meat == null || item.meatTypeEnum == meat
             val matchesZone = zone == null || item.zoneEnum == zone
             val matchesUrgency = when (urgency) {
                 UrgencyFilter.ALL -> true
-                UrgencyFilter.CRITICAL -> item.urgency == ExpiryUrgency.VENCIDO ||
-                    item.urgency == ExpiryUrgency.VENCE_HOJE ||
+                UrgencyFilter.DUE_SOON -> item.urgency == ExpiryUrgency.VENCE_HOJE ||
                     item.urgency == ExpiryUrgency.CRITICO_3_DIAS
                 UrgencyFilter.EXPIRED -> item.urgency == ExpiryUrgency.VENCIDO
+                UrgencyFilter.ON_TRACK -> item.urgency == ExpiryUrgency.ATENCAO_7_DIAS ||
+                    item.urgency == ExpiryUrgency.EM_DIA
             }
             matchesQuery && matchesMeat && matchesZone && matchesUrgency
         }
 
         val totalKg = filtered
-            .filter { it.unit == "KG" }
+            .filter { it.unitEnum == MeasurementUnit.KG }
             .sumOf { it.currentQuantity }
+        val totalOtherUnits = filtered
+            .filter { it.unitEnum != MeasurementUnit.KG }
+            .sumOf { it.currentQuantity.toInt() }
 
         InventoryUiState(
             searchQuery = query,
@@ -90,6 +99,7 @@ class InventoryViewModel(
             urgencyFilter = urgency,
             filteredItems = filtered,
             totalFilteredKg = totalKg,
+            totalFilteredOtherUnits = totalOtherUnits,
             feedbackMessage = feedback
         )
     }.stateIn(

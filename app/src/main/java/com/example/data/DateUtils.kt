@@ -8,7 +8,7 @@ import java.util.Locale
 import java.util.TimeZone
 
 object DateUtils {
-    private val ptBrLocale = Locale("pt", "BR")
+    private val ptBrLocale = Locale.forLanguageTag("pt-BR")
     private const val MILLIS_PER_DAY = 86_400_000L
 
     fun todayEpochDay(): Long {

@@ -97,6 +97,7 @@ fun ExpiryUrgencyBadge(
 fun ThermalComplianceBadge(
     compliance: ThermalCompliance,
     tempCelsius: Double? = null,
+    showTempValue: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val isDark = isSystemInDarkTheme()
@@ -117,7 +118,7 @@ fun ThermalComplianceBadge(
             Icons.Rounded.Warning
         )
     }
-    val label = if (tempCelsius != null) {
+    val label = if (tempCelsius != null && showTempValue) {
         "${DateUtils.formatTemp(tempCelsius)} • ${compliance.displayName}"
     } else {
         compliance.displayName

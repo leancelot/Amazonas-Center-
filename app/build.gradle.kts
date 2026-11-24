@@ -124,6 +124,7 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.kotlinx.serialization.json)
   implementation(libs.mlkit.barcode.scanning)
+  implementation(libs.mlkit.text.recognition)
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)

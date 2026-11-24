@@ -14,6 +14,8 @@ data class ParsedInvoiceDraft(
     val supplierCnpj: String = "",
     val sourceType: InvoiceSourceType = InvoiceSourceType.MANUAL,
     val notes: String = "",
+    val rawOcrText: String = "",
+    val extractedTempCelsius: Double? = null,
     val items: List<ParsedInvoiceItemDraft> = emptyList()
 )
 
@@ -129,7 +131,6 @@ object MeatCatalogMatcher {
             "FILE MIGNON" to "Filé Mignon",
             "COXAO MOLE" to "Coxão Mole",
             "COXAO DURO" to "Coxão Duro",
-            "CHÃ DE DENTRO" to "Coxão Mole",
             "CHA DE DENTRO" to "Coxão Mole",
             "CHA DE FORA" to "Coxão Duro",
             "COSTELA MINGA" to "Costela",
@@ -140,7 +141,12 @@ object MeatCatalogMatcher {
             "BIFE CHORIZO" to "Chorizo",
             "PEITO C/ OSSO" to "Peito de Frango",
             "PEITO S/ OSSO" to "Filé de Peito",
-            "MEIO DA ASA" to "Meio da Asa (Tulipa)"
+            "MEIO DA ASA" to "Meio da Asa (Tulipa)",
+            "COXA SOBR" to "Coxa e Sobrecoxa",
+            "COXA/SOBR" to "Coxa e Sobrecoxa",
+            "CARNE MOIDA" to "Carne Moída",
+            "LING TOSC" to "Linguiça Toscana",
+            "LING CALAB" to "Linguiça Calabresa"
         )
         for ((key, value) in abbreviationMap) {
             if (norm.contains(key)) return value
@@ -155,7 +161,7 @@ object MeatCatalogMatcher {
         return keywords.any { this.contains(it) }
     }
 
-    private fun normalizeText(input: String): String {
+    fun normalizeText(input: String): String {
         val upper = input.uppercase()
         return upper
             .replace("Á", "A").replace("À", "A").replace("Ã", "A").replace("Â", "A")

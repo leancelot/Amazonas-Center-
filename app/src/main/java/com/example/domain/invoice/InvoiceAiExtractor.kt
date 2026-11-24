@@ -37,6 +37,8 @@ class InvoiceAiExtractor {
             "accessKey" to Schema.string(description = "Chave de acesso de 44 dígitos se visível, senão vazio"),
             "supplierName" to Schema.string(description = "Nome fantasia ou razão social do fornecedor/frigorífico"),
             "supplierCnpj" to Schema.string(description = "CNPJ do fornecedor formatado ou vazio"),
+            "additionalNotes" to Schema.string(description = "Observações, dados adicionais ou anotações manuscritas/impressas da nota, vazio se não houver"),
+            "arrivalTempCelsius" to Schema.double(description = "Temperatura aferida anotada na nota em °C se visível, senão null", nullable = true),
             "items" to Schema.array(
                 description = "Lista de produtos cárneos/alimentos encontrados na nota fiscal",
                 items = Schema.obj(
@@ -59,13 +61,14 @@ class InvoiceAiExtractor {
                         "unitCostBrl" to Schema.double(description = "Valor unitário em reais (0.0 se não visível)"),
                         "batchCode" to Schema.string(description = "Código de lote se visível, senão vazio"),
                         "sifCode" to Schema.string(description = "Número do SIF se visível, senão vazio"),
-                        "expiryDateIso" to Schema.string(description = "Data de validade no formato YYYY-MM-DD se visível na nota, senão vazio")
+                        "expiryDateIso" to Schema.string(description = "Data de validade no formato YYYY-MM-DD se visível na nota, senão vazio"),
+                        "itemNotes" to Schema.string(description = "Observação ou anotação específica do item se houver, senão vazio")
                     ),
-                    optionalProperties = listOf("unitCostBrl", "batchCode", "sifCode", "expiryDateIso")
+                    optionalProperties = listOf("unitCostBrl", "batchCode", "sifCode", "expiryDateIso", "itemNotes")
                 )
             )
         ),
-        optionalProperties = listOf("invoiceNumber", "accessKey", "supplierName", "supplierCnpj")
+        optionalProperties = listOf("invoiceNumber", "accessKey", "supplierName", "supplierCnpj", "additionalNotes", "arrivalTempCelsius")
     )
 
     private val primaryModel by lazy {
@@ -236,12 +239,13 @@ class InvoiceAiExtractor {
     private fun buildPrompt(): String {
         return """
             Você é um especialista em conferência de recebimento de açougue e casa de carnes no Brasil.
-            Extraia os dados da nota fiscal / DANFE / romaneio de carnes na imagem ou documento anexo.
+            Extraia os dados da nota fiscal / DANFE / romaneio / anotações de carnes na imagem ou documento anexo.
+            Extraia também observações gerais (Dados Adicionais, observações de conferência ou anotações) em additionalNotes e a temperatura aferida em °C caso esteja anotada.
             Para cada produto:
             - Identifique o tipo de carne (BOVINA, SUINA, AVES, OVINA, PEIXES ou EMBUTIDOS_OUTROS).
             - Limpe o nome do corte (ex: "Picanha", "Contrafilé", "Costela", "Coxa e Sobrecoxa").
             - Identifique se é RESFRIADO, CONGELADO ou MATURACAO pela descrição.
-            - Extraia quantidade/peso numérico, unidade (KG, PECA ou CAIXA), valor unitário em reais, lote, SIF e data de validade (YYYY-MM-DD) caso apareça.
+            - Extraia quantidade/peso numérico, unidade (KG, PECA ou CAIXA), valor unitário em reais, lote, SIF, data de validade (YYYY-MM-DD) e observações do item caso apareçam.
             Não invente itens que não estejam no documento.
         """.trimIndent()
     }
@@ -252,6 +256,12 @@ class InvoiceAiExtractor {
         val accessKey = root.optString("accessKey", "").filter { it.isDigit() }.take(44)
         val supplierName = root.optString("supplierName", "").trim()
         val supplierCnpj = root.optString("supplierCnpj", "").trim()
+        val additionalNotes = root.optString("additionalNotes", "").trim()
+        val arrivalTemp = if (root.has("arrivalTempCelsius") && !root.isNull("arrivalTempCelsius")) {
+            root.optDouble("arrivalTempCelsius", Double.NaN).takeIf { !it.isNaN() && it in -40.0..30.0 }
+        } else {
+            null
+        }
 
         val itemsArray = root.optJSONArray("items")
         val parsedItems = mutableListOf<ParsedInvoiceItemDraft>()
@@ -268,6 +278,7 @@ class InvoiceAiExtractor {
                 val batch = obj.optString("batchCode", "").trim()
                 val sif = obj.optString("sifCode", "").trim()
                 val expiryIso = obj.optString("expiryDateIso", "").trim()
+                val itemNotes = obj.optString("itemNotes", "").trim()
 
                 val classified = MeatCatalogMatcher.classifyDescription(
                     rawDescription = rawDesc.ifBlank { explicitCut },
@@ -284,18 +295,23 @@ class InvoiceAiExtractor {
                         meatType = classified.meatType,
                         cutName = classified.cutName,
                         temperatureZone = classified.temperatureZone,
-                        measuredTempCelsius = classified.temperatureZone.defaultTempCelsius,
+                        measuredTempCelsius = arrivalTemp ?: classified.temperatureZone.defaultTempCelsius,
                         chamberName = classified.temperatureZone.defaultChamber,
                         quantity = qty,
                         unit = classified.unit,
                         unitCostBrl = cost,
                         batchCode = batch.ifBlank { classified.batchCode },
                         sifCode = sif.ifBlank { classified.sifCode },
-                        expiryEpochDay = classified.expiryEpochDay
+                        expiryEpochDay = classified.expiryEpochDay,
+                        notes = itemNotes
                     )
                 )
             }
         }
+
+        val combinedNotes = listOf("Extraído via IA na Nuvem (Reserva)", additionalNotes)
+            .filter { it.isNotBlank() }
+            .joinToString(" • ")
 
         return ParsedInvoiceDraft(
             invoiceNumber = invoiceNumber,
@@ -303,7 +319,8 @@ class InvoiceAiExtractor {
             supplierName = supplierName,
             supplierCnpj = supplierCnpj,
             sourceType = sourceType,
-            notes = "Extraído automaticamente via IA",
+            notes = combinedNotes,
+            extractedTempCelsius = arrivalTemp,
             items = parsedItems
         )
     }

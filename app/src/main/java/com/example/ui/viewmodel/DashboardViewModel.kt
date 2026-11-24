@@ -21,6 +21,7 @@ data class ChamberSummary(
     val zone: TemperatureZone,
     val lotCount: Int,
     val totalKg: Double,
+    val totalOtherUnits: Int,
     val avgTempCelsius: Double,
     val hasAlert: Boolean
 )
@@ -61,8 +62,15 @@ class DashboardViewModel(
         val chamberSummaries = items
             .groupBy { it.chamberName.ifBlank { it.zoneEnum.defaultChamber } }
             .map { (chamber, chamberItems) ->
-                val primaryZone = chamberItems.first().zoneEnum
+                val primaryZone = chamberItems
+                    .groupingBy { it.zoneEnum }
+                    .eachCount()
+                    .maxByOrNull { it.value }?.key
+                    ?: chamberItems.first().zoneEnum
                 val kg = chamberItems.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.currentQuantity }
+                val chamberOtherUnits = chamberItems
+                    .filter { it.unitEnum != MeasurementUnit.KG }
+                    .sumOf { it.currentQuantity.toInt() }
                 val avgTemp = chamberItems.map { it.measuredTempCelsius }.average()
                 val hasAlert = chamberItems.any {
                     it.urgency == ExpiryUrgency.VENCIDO || it.urgency == ExpiryUrgency.VENCE_HOJE
@@ -72,6 +80,7 @@ class DashboardViewModel(
                     zone = primaryZone,
                     lotCount = chamberItems.size,
                     totalKg = kg,
+                    totalOtherUnits = chamberOtherUnits,
                     avgTempCelsius = avgTemp,
                     hasAlert = hasAlert
                 )

@@ -80,8 +80,8 @@ enum class TemperatureZone(
 ) {
     RESFRIADO(
         displayName = "Resfriado",
-        rangeLabel = "0°C a 4°C",
-        minIdealCelsius = -1.0,
+        rangeLabel = "-1°C a 4°C",
+        minIdealCelsius = -1.5,
         maxIdealCelsius = 4.0,
         defaultTempCelsius = 2.0,
         defaultChamber = "Câmara 01 — Resfriados"
@@ -90,13 +90,13 @@ enum class TemperatureZone(
         displayName = "Congelado",
         rangeLabel = "≤ -18°C",
         minIdealCelsius = -35.0,
-        maxIdealCelsius = -12.0,
+        maxIdealCelsius = -18.0,
         defaultTempCelsius = -18.0,
         defaultChamber = "Câmara 02 — Congelados"
     ),
     MATURACAO(
         displayName = "Maturação",
-        rangeLabel = "0°C a 2°C",
+        rangeLabel = "0°C a 2,5°C",
         minIdealCelsius = -0.5,
         maxIdealCelsius = 2.5,
         defaultTempCelsius = 1.0,
@@ -133,7 +133,7 @@ enum class ThermalCompliance(val displayName: String) {
                     else -> CRITICO
                 }
                 TemperatureZone.CONGELADO -> when {
-                    measuredCelsius <= -15.0 -> CONFORME
+                    measuredCelsius <= -18.0 -> CONFORME
                     measuredCelsius <= -12.0 -> ATENCAO
                     else -> CRITICO
                 }
@@ -168,8 +168,10 @@ enum class MeasurementUnit(val displayName: String, val shortLabel: String) {
 enum class InvoiceSourceType(val displayName: String) {
     MANUAL("Lançamento Manual"),
     XML_NFE("XML NF-e"),
-    IA_FOTO("Foto da Nota (IA)"),
-    IA_PDF("PDF da Nota (IA)"),
+    OCR_FOTO("Foto da Nota (IA Local)"),
+    OCR_PDF("PDF da Nota (IA Local)"),
+    IA_FOTO("Foto da Nota (Nuvem)"),
+    IA_PDF("PDF da Nota (Nuvem)"),
     QR_DANFE("Código / QR DANFE");
 
     companion object {

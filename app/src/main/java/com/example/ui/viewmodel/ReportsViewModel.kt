@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import java.io.File
+import java.util.Locale
 
 enum class ReportPeriod(val label: String, val days: Int?) {
     DAYS_7("7 dias", 7),
@@ -49,6 +50,7 @@ data class LossReasonBreakdown(
 data class ReportsUiState(
     val period: ReportPeriod = ReportPeriod.DAYS_30,
     val totalStockKg: Double = 0.0,
+    val totalStockOtherUnits: Int = 0,
     val totalActiveLots: Int = 0,
     val totalOutgoingKg: Double = 0.0,
     val totalLossKg: Double = 0.0,
@@ -78,6 +80,7 @@ class ReportsViewModel(
 
         val periodMovements = allMovements.filter { it.createdAtMillis >= cutoffMillis }
         val totalStockKg = activeItems.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.currentQuantity }
+        val totalStockOtherUnits = activeItems.filter { it.unitEnum != MeasurementUnit.KG }.sumOf { it.currentQuantity.toInt() }
 
         val outgoingKg = periodMovements
             .filter { it.movementTypeEnum.isOutgoing && !it.movementTypeEnum.isLoss && it.unitEnum == MeasurementUnit.KG }
@@ -126,6 +129,7 @@ class ReportsViewModel(
         ReportsUiState(
             period = period,
             totalStockKg = totalStockKg,
+            totalStockOtherUnits = totalStockOtherUnits,
             totalActiveLots = activeItems.size,
             totalOutgoingKg = outgoingKg,
             totalLossKg = totalLossKg,
@@ -149,24 +153,26 @@ class ReportsViewModel(
 
     fun buildTextSummary(): String {
         val state = uiState.value
+        val ptBr = Locale.forLanguageTag("pt-BR")
         val sb = StringBuilder()
         sb.appendLine("RELATÓRIO DE CONFERÊNCIA — AMAZONAS CENTER (${state.period.label})")
         sb.appendLine("Gerado em: ${DateUtils.formatDateTime(System.currentTimeMillis())}")
         sb.appendLine("----------------------------------------")
-        sb.appendLine("Estoque Atual: ${String.format("%.2f", state.totalStockKg)} kg (${state.totalActiveLots} lotes)")
-        sb.appendLine("Saídas p/ Balcão/Desossa: ${String.format("%.2f", state.totalOutgoingKg)} kg")
-        sb.appendLine("Perdas no Período: ${String.format("%.2f", state.totalLossKg)} kg (${DateUtils.formatCurrencyBrl(state.totalLossBrl)})")
-        sb.appendLine("Índice de Quebra: ${String.format("%.1f", state.lossRatePercent)}%")
+        val otherSuffix = if (state.totalStockOtherUnits > 0) " + ${state.totalStockOtherUnits} pç/cx" else ""
+        sb.appendLine("Estoque Atual: ${String.format(ptBr, "%.2f", state.totalStockKg)} kg$otherSuffix (${state.totalActiveLots} lotes)")
+        sb.appendLine("Saídas p/ Balcão/Desossa: ${String.format(ptBr, "%.2f", state.totalOutgoingKg)} kg")
+        sb.appendLine("Perdas no Período: ${String.format(ptBr, "%.2f", state.totalLossKg)} kg (${DateUtils.formatCurrencyBrl(state.totalLossBrl)})")
+        sb.appendLine("Índice de Quebra: ${String.format(ptBr, "%.1f", state.lossRatePercent)}%")
         sb.appendLine()
         sb.appendLine("ESTOQUE POR TIPO DE CARNE:")
         state.meatBreakdown.forEach {
-            sb.appendLine("- ${it.meatType.displayName}: ${String.format("%.2f", it.totalKg)} kg (${it.lotCount} lotes)")
+            sb.appendLine("- ${it.meatType.displayName}: ${String.format(ptBr, "%.2f", it.totalKg)} kg (${it.lotCount} lotes)")
         }
         if (state.lossReasons.isNotEmpty()) {
             sb.appendLine()
             sb.appendLine("DETALHAMENTO DE PERDAS:")
             state.lossReasons.forEach {
-                sb.appendLine("- ${it.movementType.displayName}: ${String.format("%.2f", it.totalKg)} kg (${it.count}x)")
+                sb.appendLine("- ${it.movementType.displayName}: ${String.format(ptBr, "%.2f", it.totalKg)} kg (${it.count}x)")
             }
         }
         return sb.toString()
@@ -175,25 +181,27 @@ class ReportsViewModel(
     fun createConferenceCsvUri(context: Context): Uri? {
         return try {
             val state = uiState.value
+            val ptBr = Locale.forLanguageTag("pt-BR")
             val dir = File(context.cacheDir, "reports").apply { mkdirs() }
             val file = File(dir, "conferencia_camara_${System.currentTimeMillis()}.csv")
             val csv = buildString {
-                appendLine("Tipo;Corte;Zona;Temp_C;Camara;Saldo;Unidade;Validade;Lote;SIF;Fornecedor;NF")
+                appendLine("Tipo;Corte;Zona;Temp_C;Camara;Saldo;Unidade;Validade;Lote;SIF;Fornecedor;NF;Observacoes")
                 state.activeItemsSnapshot.forEach { item ->
                     appendLine(
                         listOf(
                             item.meatTypeEnum.displayName,
                             item.cutName,
                             item.zoneEnum.displayName,
-                            item.measuredTempCelsius.toString(),
+                            String.format(ptBr, "%.1f", item.measuredTempCelsius),
                             item.chamberName,
-                            String.format("%.2f", item.currentQuantity),
+                            String.format(ptBr, "%.2f", item.currentQuantity),
                             item.unitEnum.shortLabel,
                             DateUtils.formatEpochDay(item.expiryDateEpochDay),
                             item.batchCode,
                             item.sifCode,
                             item.supplierName,
-                            item.invoiceNumber
+                            item.invoiceNumber,
+                            item.notes
                         ).joinToString(";") { cell -> cell.replace(";", ",") }
                     )
                 }

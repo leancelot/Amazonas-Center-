@@ -101,5 +101,6 @@ data class ReceivingSessionSummary(
     val sourceType: String,
     val responsibleName: String,
     val itemCount: Int,
-    val totalKg: Double
+    val totalKg: Double,
+    val notes: String = ""
 )

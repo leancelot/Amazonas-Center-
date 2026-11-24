@@ -31,7 +31,8 @@ interface ColdStorageDao {
                s.measuredTempCelsius, s.targetZone, s.thermalStatus, s.sourceType,
                s.responsibleName,
                COUNT(i.id) AS itemCount,
-               COALESCE(SUM(CASE WHEN i.unit = 'KG' THEN i.initialQuantity ELSE 0 END), 0.0) AS totalKg
+               COALESCE(SUM(CASE WHEN i.unit = 'KG' THEN i.initialQuantity ELSE 0 END), 0.0) AS totalKg,
+               s.notes AS notes
         FROM receiving_sessions s
         LEFT JOIN cold_storage_items i ON i.sessionId = s.id
         GROUP BY s.id

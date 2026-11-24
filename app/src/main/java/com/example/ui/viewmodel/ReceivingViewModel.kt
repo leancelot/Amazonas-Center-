@@ -13,6 +13,7 @@ import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
 import com.example.domain.invoice.DanfeQrParser
 import com.example.domain.invoice.InvoiceAiExtractor
+import com.example.domain.invoice.InvoiceLocalExtractor
 import com.example.domain.invoice.NfeXmlParser
 import com.example.domain.invoice.ParsedInvoiceDraft
 import com.example.domain.invoice.ParsedInvoiceItemDraft
@@ -25,12 +26,22 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
+import kotlin.math.abs
 
 sealed interface ExtractionUiState {
     data object Idle : ExtractionUiState
     data class Loading(val label: String) : ExtractionUiState
-    data class Success(val message: String) : ExtractionUiState
-    data class Error(val message: String) : ExtractionUiState
+    data class Success(
+        val message: String,
+        val rawOcrText: String = "",
+        val canRetryWithCloud: Boolean = false
+    ) : ExtractionUiState
+    data class Error(
+        val message: String,
+        val rawOcrText: String = "",
+        val canRetryWithCloud: Boolean = false
+    ) : ExtractionUiState
 }
 
 data class ReceivingFormState(
@@ -55,6 +66,7 @@ data class ReceivingFormState(
 
 class ReceivingViewModel(
     private val repository: ColdStorageRepository,
+    private val localExtractor: InvoiceLocalExtractor,
     private val aiExtractor: InvoiceAiExtractor
 ) : ViewModel() {
 
@@ -63,6 +75,9 @@ class ReceivingViewModel(
 
     private val _extractionState = MutableStateFlow<ExtractionUiState>(ExtractionUiState.Idle)
     val extractionState: StateFlow<ExtractionUiState> = _extractionState.asStateFlow()
+
+    private var lastMediaUri: Uri? = null
+    private var lastMediaIsPdf: Boolean = false
 
     val pastSessions: StateFlow<List<ReceivingSessionSummary>> = repository.sessionSummaries
         .stateIn(
@@ -75,19 +90,57 @@ class ReceivingViewModel(
     fun updateAccessKey(value: String) = _formState.update { it.copy(accessKey = value) }
     fun updateSupplierName(value: String) = _formState.update { it.copy(supplierName = value) }
     fun updateSupplierCnpj(value: String) = _formState.update { it.copy(supplierCnpj = value) }
-    fun updateMeasuredTemp(value: String) = _formState.update { it.copy(measuredTempText = value) }
     fun updateResponsibleName(value: String) = _formState.update { it.copy(responsibleName = value) }
     fun updateNotes(value: String) = _formState.update { it.copy(notes = value) }
+
+    fun updateMeasuredTemp(value: String) {
+        val sanitized = sanitizeTemperatureInput(value)
+        _formState.update { current ->
+            val oldTemp = current.parsedTempCelsius ?: current.targetZone.defaultTempCelsius
+            val newTemp = sanitized.replace(',', '.').toDoubleOrNull()
+            val syncedItems = if (newTemp != null) {
+                current.items.map { item ->
+                    val matchesZone = item.temperatureZone == current.targetZone
+                    val wasSyncedWithSession = abs(item.measuredTempCelsius - oldTemp) < 0.05 ||
+                        abs(item.measuredTempCelsius - item.temperatureZone.defaultTempCelsius) < 0.05
+                    if (matchesZone && wasSyncedWithSession) {
+                        item.copy(measuredTempCelsius = newTemp)
+                    } else {
+                        item
+                    }
+                }
+            } else {
+                current.items
+            }
+            current.copy(measuredTempText = sanitized, items = syncedItems)
+        }
+    }
 
     fun updateTargetZone(zone: TemperatureZone) {
         _formState.update { current ->
             val currentTemp = current.parsedTempCelsius
-            val updatedTemp = if (currentTemp == null || currentTemp == current.targetZone.defaultTempCelsius) {
-                zone.defaultTempCelsius.toString()
+            val isStillDefault = currentTemp == null ||
+                abs(currentTemp - current.targetZone.defaultTempCelsius) < 0.05
+            val updatedTempText = if (isStillDefault) {
+                formatTempForInput(zone.defaultTempCelsius)
             } else {
                 current.measuredTempText
             }
-            current.copy(targetZone = zone, measuredTempText = updatedTemp)
+            current.copy(targetZone = zone, measuredTempText = updatedTempText)
+        }
+    }
+
+    fun syncAllItemsToSessionTemp() {
+        _formState.update { current ->
+            val temp = current.parsedTempCelsius ?: current.targetZone.defaultTempCelsius
+            val updated = current.items.map { item ->
+                if (item.temperatureZone == current.targetZone) {
+                    item.copy(measuredTempCelsius = temp)
+                } else {
+                    item
+                }
+            }
+            current.copy(items = updated)
         }
     }
 
@@ -114,6 +167,7 @@ class ReceivingViewModel(
     }
 
     fun importXmlUri(context: Context, uri: Uri) {
+        lastMediaUri = null
         viewModelScope.launch {
             _extractionState.value = ExtractionUiState.Loading("Lendo arquivo XML da NF-e...")
             val result = withContext(Dispatchers.IO) {
@@ -127,12 +181,12 @@ class ReceivingViewModel(
                 onSuccess = { draft ->
                     applyParsedDraft(draft, replaceItems = true)
                     _extractionState.value = ExtractionUiState.Success(
-                        "XML NF-e ${draft.invoiceNumber.ifBlank { "" }} importado com ${draft.items.size} produto(s)."
+                        message = "XML NF-e ${draft.invoiceNumber.ifBlank { "" }} importado com ${draft.items.size} produto(s)."
                     )
                 },
                 onFailure = { err ->
                     _extractionState.value = ExtractionUiState.Error(
-                        err.localizedMessage ?: "Erro ao processar XML da NF-e."
+                        message = err.localizedMessage ?: "Erro ao processar XML da NF-e."
                     )
                 }
             )
@@ -140,19 +194,24 @@ class ReceivingViewModel(
     }
 
     fun extractFromImageUri(context: Context, uri: Uri) {
+        lastMediaUri = uri
+        lastMediaIsPdf = false
         viewModelScope.launch {
-            _extractionState.value = ExtractionUiState.Loading("Analisando foto da nota fiscal com IA...")
-            val result = aiExtractor.extractFromImageUri(context, uri)
+            _extractionState.value = ExtractionUiState.Loading("Lendo foto e anotações no aparelho (OCR offline)...")
+            val result = localExtractor.extractFromImageUri(context, uri)
             result.fold(
                 onSuccess = { draft ->
                     applyParsedDraft(draft, replaceItems = false)
                     _extractionState.value = ExtractionUiState.Success(
-                        "Foto lida: ${draft.items.size} produto(s) preenchido(s). Revise antes de salvar."
+                        message = buildLocalSuccessMessage("Foto lida offline", draft),
+                        rawOcrText = draft.rawOcrText,
+                        canRetryWithCloud = true
                     )
                 },
                 onFailure = { err ->
                     _extractionState.value = ExtractionUiState.Error(
-                        err.localizedMessage ?: "Não foi possível extrair os dados da foto."
+                        message = err.localizedMessage ?: "Não foi possível extrair os dados da foto localmente.",
+                        canRetryWithCloud = true
                     )
                 }
             )
@@ -160,19 +219,79 @@ class ReceivingViewModel(
     }
 
     fun extractFromPdfUri(context: Context, uri: Uri) {
+        lastMediaUri = uri
+        lastMediaIsPdf = true
         viewModelScope.launch {
-            _extractionState.value = ExtractionUiState.Loading("Analisando PDF da nota fiscal com IA...")
+            _extractionState.value = ExtractionUiState.Loading("Lendo PDF e anotações no aparelho (OCR offline)...")
+            val result = localExtractor.extractFromPdfUri(context, uri)
+            result.fold(
+                onSuccess = { draft ->
+                    applyParsedDraft(draft, replaceItems = false)
+                    _extractionState.value = ExtractionUiState.Success(
+                        message = buildLocalSuccessMessage("PDF lido offline", draft),
+                        rawOcrText = draft.rawOcrText,
+                        canRetryWithCloud = true
+                    )
+                },
+                onFailure = { err ->
+                    _extractionState.value = ExtractionUiState.Error(
+                        message = err.localizedMessage ?: "Não foi possível extrair os dados do PDF localmente.",
+                        canRetryWithCloud = true
+                    )
+                }
+            )
+        }
+    }
+
+    fun retryLastMediaWithCloudReserve(context: Context) {
+        val uri = lastMediaUri ?: return
+        if (lastMediaIsPdf) {
+            extractWithCloudReserveFromPdfUri(context, uri)
+        } else {
+            extractWithCloudReserveFromImageUri(context, uri)
+        }
+    }
+
+    fun extractWithCloudReserveFromImageUri(context: Context, uri: Uri) {
+        lastMediaUri = uri
+        lastMediaIsPdf = false
+        viewModelScope.launch {
+            _extractionState.value = ExtractionUiState.Loading("Reanalisando foto com IA na nuvem (reserva)...")
+            val result = aiExtractor.extractFromImageUri(context, uri)
+            result.fold(
+                onSuccess = { draft ->
+                    applyParsedDraft(draft, replaceItems = false)
+                    _extractionState.value = ExtractionUiState.Success(
+                        message = "Nuvem (reserva): ${draft.items.size} produto(s) extraído(s). Revise antes de salvar."
+                    )
+                },
+                onFailure = { err ->
+                    _extractionState.value = ExtractionUiState.Error(
+                        message = err.localizedMessage ?: "Não foi possível consultar a IA na nuvem.",
+                        canRetryWithCloud = true
+                    )
+                }
+            )
+        }
+    }
+
+    fun extractWithCloudReserveFromPdfUri(context: Context, uri: Uri) {
+        lastMediaUri = uri
+        lastMediaIsPdf = true
+        viewModelScope.launch {
+            _extractionState.value = ExtractionUiState.Loading("Reanalisando PDF com IA na nuvem (reserva)...")
             val result = aiExtractor.extractFromPdfUri(context, uri)
             result.fold(
                 onSuccess = { draft ->
                     applyParsedDraft(draft, replaceItems = false)
                     _extractionState.value = ExtractionUiState.Success(
-                        "PDF lido: ${draft.items.size} produto(s) preenchido(s). Revise antes de salvar."
+                        message = "Nuvem (reserva): ${draft.items.size} produto(s) extraído(s). Revise antes de salvar."
                     )
                 },
                 onFailure = { err ->
                     _extractionState.value = ExtractionUiState.Error(
-                        err.localizedMessage ?: "Não foi possível extrair os dados do PDF."
+                        message = err.localizedMessage ?: "Não foi possível consultar a IA na nuvem.",
+                        canRetryWithCloud = true
                     )
                 }
             )
@@ -250,6 +369,7 @@ class ReceivingViewModel(
                     )
                 }
                 repository.saveReceivingSession(session, entities)
+                lastMediaUri = null
                 _formState.value = ReceivingFormState()
                 _extractionState.value = ExtractionUiState.Success(
                     "Recebimento salvo! ${entities.size} lote(s) entraram na câmara fria."
@@ -264,6 +384,7 @@ class ReceivingViewModel(
     }
 
     fun resetForm() {
+        lastMediaUri = null
         _formState.value = ReceivingFormState()
         _extractionState.value = ExtractionUiState.Idle
     }
@@ -274,14 +395,47 @@ class ReceivingViewModel(
         }
     }
 
+    private fun buildLocalSuccessMessage(prefix: String, draft: ParsedInvoiceDraft): String {
+        val parts = mutableListOf<String>()
+        if (draft.invoiceNumber.isNotBlank()) parts.add("NF ${draft.invoiceNumber}")
+        parts.add("${draft.items.size} produto(s)")
+        if (draft.extractedTempCelsius != null) parts.add("temp. detectada")
+        return if (draft.items.isEmpty()) {
+            "$prefix (${parts.joinToString(", ")}). Confira o texto OCR ou tente a reserva na nuvem se necessário."
+        } else {
+            "$prefix: ${parts.joinToString(", ")} preenchido(s). Revise antes de salvar."
+        }
+    }
+
     private fun applyParsedDraft(draft: ParsedInvoiceDraft, replaceItems: Boolean) {
         _formState.update { current ->
-            val mergedItems = if (replaceItems) {
-                draft.items
-            } else {
-                current.items + draft.items
-            }
             val inferredZone = draft.items.firstOrNull()?.temperatureZone ?: current.targetZone
+            val currentSessionTemp = current.parsedTempCelsius
+            val userCustomizedTemp = currentSessionTemp != null &&
+                abs(currentSessionTemp - current.targetZone.defaultTempCelsius) >= 0.05
+
+            val effectiveSessionTemp = when {
+                draft.extractedTempCelsius != null -> draft.extractedTempCelsius
+                userCustomizedTemp && inferredZone == current.targetZone -> currentSessionTemp!!
+                inferredZone != current.targetZone -> inferredZone.defaultTempCelsius
+                else -> currentSessionTemp ?: inferredZone.defaultTempCelsius
+            }
+
+            val normalizedDraftItems = draft.items.map { item ->
+                val isItemStillDefault = abs(item.measuredTempCelsius - item.temperatureZone.defaultTempCelsius) < 0.05
+                if (item.temperatureZone == inferredZone && isItemStillDefault) {
+                    item.copy(measuredTempCelsius = effectiveSessionTemp)
+                } else {
+                    item
+                }
+            }
+
+            val mergedItems = if (replaceItems) {
+                normalizedDraftItems
+            } else {
+                current.items + normalizedDraftItems
+            }
+
             current.copy(
                 invoiceNumber = draft.invoiceNumber.ifBlank { current.invoiceNumber },
                 accessKey = draft.accessKey.ifBlank { current.accessKey },
@@ -289,17 +443,46 @@ class ReceivingViewModel(
                 supplierCnpj = draft.supplierCnpj.ifBlank { current.supplierCnpj },
                 sourceType = draft.sourceType,
                 targetZone = inferredZone,
-                measuredTempText = if (current.measuredTempText == "2.0" && inferredZone != TemperatureZone.RESFRIADO) {
-                    inferredZone.defaultTempCelsius.toString()
-                } else {
-                    current.measuredTempText
-                },
+                measuredTempText = formatTempForInput(effectiveSessionTemp),
                 notes = listOf(current.notes, draft.notes)
                     .filter { it.isNotBlank() }
                     .distinct()
                     .joinToString(" • "),
                 items = mergedItems
             )
+        }
+    }
+
+    private fun formatTempForInput(temp: Double): String {
+        return String.format(Locale.US, "%.1f", temp)
+    }
+
+    companion object {
+        fun sanitizeTemperatureInput(raw: String): String {
+            val sb = StringBuilder()
+            var hasSeparator = false
+            raw.forEachIndexed { index, ch ->
+                when {
+                    ch == '-' && index == 0 -> sb.append(ch)
+                    ch.isDigit() -> sb.append(ch)
+                    (ch == '.' || ch == ',') && !hasSeparator -> {
+                        hasSeparator = true
+                        sb.append(ch)
+                    }
+                }
+            }
+            return sb.toString()
+        }
+
+        fun toggleTemperatureSign(raw: String): String {
+            val trimmed = raw.trim()
+            return if (trimmed.startsWith("-")) {
+                trimmed.removePrefix("-")
+            } else if (trimmed.isEmpty()) {
+                "-"
+            } else {
+                "-$trimmed"
+            }
         }
     }
 }

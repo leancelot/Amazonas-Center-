@@ -90,17 +90,19 @@ fun ReportsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    val ptBr = Locale.forLanguageTag("pt-BR")
+                    val otherSuffix = if (state.totalStockOtherUnits > 0) " • +${state.totalStockOtherUnits} pç/cx" else ""
                     ReportKpiCard(
                         title = "Estoque Atual",
-                        value = String.format(Locale("pt", "BR"), "%.1f kg", state.totalStockKg),
-                        subtitle = "${state.totalActiveLots} lotes ativos",
+                        value = String.format(ptBr, "%.1f kg", state.totalStockKg),
+                        subtitle = "${state.totalActiveLots} lotes ativos$otherSuffix",
                         isError = false,
                         modifier = Modifier.weight(1f)
                     )
                     ReportKpiCard(
                         title = "Perdas (${state.period.label})",
-                        value = String.format(Locale("pt", "BR"), "%.1f kg", state.totalLossKg),
-                        subtitle = "${String.format(Locale("pt", "BR"), "%.1f", state.lossRatePercent)}% quebra • " +
+                        value = String.format(ptBr, "%.1f kg", state.totalLossKg),
+                        subtitle = "${String.format(ptBr, "%.1f", state.lossRatePercent)}% quebra • " +
                             DateUtils.formatCurrencyBrl(state.totalLossBrl),
                         isError = state.totalLossKg > 0.0,
                         modifier = Modifier.weight(1f)
@@ -188,7 +190,7 @@ fun ReportsScreen(
                                             fontWeight = FontWeight.SemiBold
                                         )
                                         Text(
-                                            text = String.format(Locale("pt", "BR"), "%.1f kg", row.totalKg),
+                                            text = String.format(Locale.forLanguageTag("pt-BR"), "%.1f kg", row.totalKg),
                                             style = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFamily)
                                         )
                                     }
@@ -240,7 +242,7 @@ fun ReportsScreen(
                                         style = MaterialTheme.typography.bodyMedium
                                     )
                                     Text(
-                                        text = "${String.format(Locale("pt", "BR"), "%.2f", loss.totalKg)} kg",
+                                        text = "${String.format(Locale.forLanguageTag("pt-BR"), "%.2f", loss.totalKg)} kg",
                                         style = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFamily),
                                         color = MaterialTheme.colorScheme.error,
                                         fontWeight = FontWeight.Bold

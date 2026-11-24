@@ -33,10 +33,13 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudQueue
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.PictureAsPdf
 import androidx.compose.material.icons.rounded.QrCodeScanner
@@ -56,6 +59,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -79,6 +83,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.DateUtils
+import com.example.data.ReceivingSessionSummary
 import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
 import com.example.domain.invoice.ParsedInvoiceItemDraft
@@ -92,6 +97,7 @@ import com.example.ui.viewmodel.ExtractionUiState
 import com.example.ui.viewmodel.ReceivingViewModel
 import java.io.File
 import java.util.Locale
+import kotlin.math.abs
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -107,14 +113,22 @@ fun ReceivingScreen(
 
     var selectedTab by remember { mutableIntStateOf(0) }
     var showPhotoSourceDialog by remember { mutableStateOf(false) }
+    var useCloudReserveForNextPhoto by remember { mutableStateOf(false) }
     var editingItem by remember { mutableStateOf<ParsedInvoiceItemDraft?>(null) }
     var showManualItemSheet by remember { mutableStateOf(false) }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingDeleteSession by remember { mutableStateOf<ReceivingSessionSummary?>(null) }
 
     val galleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
-        uri?.let { viewModel.extractFromImageUri(context, it) }
+        uri?.let {
+            if (useCloudReserveForNextPhoto) {
+                viewModel.extractWithCloudReserveFromImageUri(context, it)
+            } else {
+                viewModel.extractFromImageUri(context, it)
+            }
+        }
     }
 
     val takePictureLauncher = rememberLauncherForActivityResult(
@@ -122,7 +136,11 @@ fun ReceivingScreen(
     ) { success ->
         val uri = pendingCameraUri
         if (success && uri != null) {
-            viewModel.extractFromImageUri(context, uri)
+            if (useCloudReserveForNextPhoto) {
+                viewModel.extractWithCloudReserveFromImageUri(context, uri)
+            } else {
+                viewModel.extractFromImageUri(context, uri)
+            }
         }
     }
 
@@ -200,6 +218,7 @@ fun ReceivingScreen(
                     item {
                         ExtractionBanner(
                             state = extractionState,
+                            onRetryCloud = { viewModel.retryLastMediaWithCloudReserve(context) },
                             onDismiss = viewModel::clearExtractionBanner
                         )
                     }
@@ -217,17 +236,20 @@ fun ReceivingScreen(
                         ) {
                             InvoiceActionTile(
                                 icon = Icons.Rounded.CameraAlt,
-                                title = "Foto (IA)",
-                                subtitle = "Câmera/Galeria",
-                                onClick = { showPhotoSourceDialog = true },
+                                title = "Foto (IA Local)",
+                                subtitle = "Offline • OCR",
+                                onClick = {
+                                    useCloudReserveForNextPhoto = false
+                                    showPhotoSourceDialog = true
+                                },
                                 modifier = Modifier
                                     .weight(1f)
                                     .testTag("action_invoice_photo_ai")
                             )
                             InvoiceActionTile(
                                 icon = Icons.Rounded.PictureAsPdf,
-                                title = "PDF (IA)",
-                                subtitle = "DANFE PDF",
+                                title = "PDF (IA Local)",
+                                subtitle = "Offline • OCR",
                                 onClick = { pdfLauncher.launch(arrayOf("application/pdf")) },
                                 modifier = Modifier
                                     .weight(1f)
@@ -330,7 +352,19 @@ fun ReceivingScreen(
                                         value = formState.measuredTempText,
                                         onValueChange = viewModel::updateMeasuredTemp,
                                         label = { Text("Temp. chegada (°C)") },
-                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                        trailingIcon = {
+                                            TextButton(
+                                                onClick = {
+                                                    viewModel.updateMeasuredTemp(
+                                                        ReceivingViewModel.toggleTemperatureSign(formState.measuredTempText)
+                                                    )
+                                                },
+                                                modifier = Modifier.testTag("session_temp_sign_button")
+                                            ) {
+                                                Text("±", fontWeight = FontWeight.Bold)
+                                            }
+                                        },
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                                         singleLine = true,
                                         modifier = Modifier
                                             .weight(1f)
@@ -339,7 +373,24 @@ fun ReceivingScreen(
                                     formState.thermalCompliance?.let { compliance ->
                                         ThermalComplianceBadge(
                                             compliance = compliance,
-                                            tempCelsius = formState.parsedTempCelsius
+                                            tempCelsius = formState.parsedTempCelsius,
+                                            showTempValue = false
+                                        )
+                                    }
+                                }
+
+                                val sessionTemp = formState.parsedTempCelsius
+                                val hasDivergentZoneItem = sessionTemp != null && formState.items.any { item ->
+                                    item.temperatureZone == formState.targetZone &&
+                                        abs(item.measuredTempCelsius - sessionTemp) >= 0.1
+                                }
+                                if (hasDivergentZoneItem && sessionTemp != null) {
+                                    TextButton(
+                                        onClick = viewModel::syncAllItemsToSessionTemp,
+                                        modifier = Modifier.align(Alignment.End)
+                                    ) {
+                                        Text(
+                                            text = "Aplicar ${DateUtils.formatTemp(sessionTemp)} nos itens ${formState.targetZone.displayName}"
                                         )
                                     }
                                 }
@@ -347,9 +398,12 @@ fun ReceivingScreen(
                                 OutlinedTextField(
                                     value = formState.notes,
                                     onValueChange = viewModel::updateNotes,
-                                    label = { Text("Observações sanitárias / chave (opcional)") },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
+                                    label = { Text("Observações da nota / sanitárias (opcional)") },
+                                    minLines = 1,
+                                    maxLines = 3,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("session_notes_input")
                                 )
                             }
                         }
@@ -409,6 +463,8 @@ fun ReceivingScreen(
                         items(formState.items, key = { it.localId }) { draftItem ->
                             DraftItemCard(
                                 item = draftItem,
+                                sessionTempCelsius = formState.parsedTempCelsius,
+                                sessionZone = formState.targetZone,
                                 onEdit = {
                                     editingItem = draftItem
                                     showManualItemSheet = true
@@ -494,7 +550,7 @@ fun ReceivingScreen(
                                             fontWeight = FontWeight.Bold,
                                             modifier = Modifier.weight(1f)
                                         )
-                                        IconButton(onClick = { viewModel.deleteSession(session.id) }) {
+                                        IconButton(onClick = { pendingDeleteSession = session }) {
                                             Icon(
                                                 Icons.Rounded.Delete,
                                                 contentDescription = "Excluir sessão",
@@ -502,18 +558,33 @@ fun ReceivingScreen(
                                             )
                                         }
                                     }
+                                    val ptBr = Locale.forLanguageTag("pt-BR")
                                     Text(
                                         text = buildString {
                                             if (session.invoiceNumber.isNotBlank()) append("NF ${session.invoiceNumber} • ")
                                             append("${session.itemCount} itens")
                                             if (session.totalKg > 0) {
-                                                append(" (${String.format(Locale("pt", "BR"), "%.1f", session.totalKg)} kg)")
+                                                append(" (${String.format(ptBr, "%.1f", session.totalKg)} kg)")
                                             }
                                             append(" • ${DateUtils.formatDateTime(session.receivedAtMillis)}")
                                         },
                                         style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
+                                    if (session.responsibleName.isNotBlank()) {
+                                        Text(
+                                            text = "Conferente: ${session.responsibleName}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    if (session.notes.isNotBlank()) {
+                                        Text(
+                                            text = session.notes,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                     ThermalComplianceBadge(
                                         compliance = ThermalCompliance.entries.firstOrNull { it.name == session.thermalStatus }
                                             ?: ThermalCompliance.CONFORME,
@@ -528,11 +599,67 @@ fun ReceivingScreen(
         }
     }
 
+    pendingDeleteSession?.let { session ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteSession = null },
+            title = { Text("Excluir sessão de recebimento?") },
+            text = {
+                Text("Remover o histórico de ${session.supplierName}" +
+                    if (session.invoiceNumber.isNotBlank()) " (NF ${session.invoiceNumber})?" else "?")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deleteSession(session.id)
+                        pendingDeleteSession = null
+                    }
+                ) {
+                    Text("Excluir", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteSession = null }) {
+                    Text("Cancelar")
+                }
+            }
+        )
+    }
+
     if (showPhotoSourceDialog) {
         AlertDialog(
             onDismissRequest = { showPhotoSourceDialog = false },
             title = { SelectionContainer { Text("Selecionar Foto da Nota") } },
-            text = { SelectionContainer { Text("A IA extrairá fornecedor, NF e cortes automaticamente para revisão.") } },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    SelectionContainer {
+                        Text(
+                            "Por padrão, o OCR local lê fornecedor, NF, cortes, pesos, lote, SIF, validade e anotações 100% offline."
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Usar IA na nuvem (reserva)",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                            Text(
+                                text = "Requer internet e Firebase configurado",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = useCloudReserveForNextPhoto,
+                            onCheckedChange = { useCloudReserveForNextPhoto = it },
+                            modifier = Modifier.testTag("photo_cloud_reserve_switch")
+                        )
+                    }
+                }
+            },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -576,6 +703,7 @@ fun ReceivingScreen(
         ManualItemSheet(
             initialItem = editingItem,
             defaultZone = formState.targetZone,
+            sessionTempCelsius = if (editingItem == null) formState.parsedTempCelsius else null,
             onDismiss = { showManualItemSheet = false },
             onSave = { item ->
                 viewModel.addOrUpdateDraftItem(item)
@@ -631,9 +759,15 @@ private fun InvoiceActionTile(
 @Composable
 private fun DraftItemCard(
     item: ParsedInvoiceItemDraft,
+    sessionTempCelsius: Double?,
+    sessionZone: TemperatureZone,
     onEdit: () -> Unit,
     onRemove: () -> Unit
 ) {
+    val hasDistinctTemp = item.temperatureZone != sessionZone ||
+        sessionTempCelsius == null ||
+        abs(item.measuredTempCelsius - sessionTempCelsius) >= 0.1
+
     Card(
         onClick = onEdit,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -662,11 +796,22 @@ private fun DraftItemCard(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "${item.chamberName} • ${DateUtils.formatTemp(item.measuredTempCelsius)}" +
-                            if (item.batchCode.isNotBlank()) " • Lote ${item.batchCode}" else "",
+                        text = buildString {
+                            append(item.chamberName)
+                            if (hasDistinctTemp) append(" • ${DateUtils.formatTemp(item.measuredTempCelsius)}")
+                            if (item.batchCode.isNotBlank()) append(" • Lote ${item.batchCode}")
+                            if (item.sifCode.isNotBlank()) append(" • SIF ${item.sifCode}")
+                        },
                         style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (item.notes.isNotBlank()) {
+                        Text(
+                            text = "Obs.: ${item.notes}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
@@ -695,12 +840,16 @@ private fun DraftItemCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ExtractionBanner(
     state: ExtractionUiState,
+    onRetryCloud: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    var showRawOcr by remember(state) { mutableStateOf(false) }
+
     when (state) {
         ExtractionUiState.Idle -> Unit
         is ExtractionUiState.Loading -> {
@@ -725,25 +874,93 @@ private fun ExtractionBanner(
                 shape = MaterialTheme.shapes.medium,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(
+                Column(
                     modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(
-                        text = state.message,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.weight(1f)
-                    )
-                    IconButton(onClick = { copyTextToClipboard(context, state.message) }) {
-                        Icon(
-                            Icons.Rounded.ContentCopy,
-                            contentDescription = "Copiar mensagem",
-                            modifier = Modifier.size(20.dp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = state.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
                         )
+                        IconButton(onClick = { copyTextToClipboard(context, state.message) }) {
+                            Icon(
+                                Icons.Rounded.ContentCopy,
+                                contentDescription = "Copiar mensagem",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        IconButton(onClick = onDismiss) {
+                            Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.cd_close))
+                        }
                     }
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.cd_close))
+                    if (state.rawOcrText.isNotBlank() || state.canRetryWithCloud) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            if (state.rawOcrText.isNotBlank()) {
+                                OutlinedButton(
+                                    onClick = { showRawOcr = !showRawOcr },
+                                    modifier = Modifier.testTag("toggle_raw_ocr_button")
+                                ) {
+                                    Icon(
+                                        imageVector = if (showRawOcr) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(if (showRawOcr) "Ocultar OCR" else "Ver texto OCR")
+                                }
+                            }
+                            if (state.canRetryWithCloud) {
+                                OutlinedButton(
+                                    onClick = onRetryCloud,
+                                    modifier = Modifier.testTag("retry_cloud_reserve_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.CloudQueue,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Nuvem (Reserva)")
+                                }
+                            }
+                        }
+                    }
+                    if (showRawOcr && state.rawOcrText.isNotBlank()) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surface,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Texto reconhecido localmente",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    TextButton(onClick = { copyTextToClipboard(context, state.rawOcrText) }) {
+                                        Text("Copiar OCR")
+                                    }
+                                }
+                                Text(
+                                    text = state.rawOcrText,
+                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -754,34 +971,53 @@ private fun ExtractionBanner(
                 shape = MaterialTheme.shapes.medium,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(
+                Column(
                     modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(
-                        text = state.message,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.weight(1f)
-                    )
-                    IconButton(
-                        onClick = { copyTextToClipboard(context, state.message) },
-                        modifier = Modifier.testTag("copy_extraction_error_button")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Icon(
-                            Icons.Rounded.ContentCopy,
-                            contentDescription = "Copiar mensagem de erro",
-                            tint = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.size(20.dp)
+                        Text(
+                            text = state.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.weight(1f)
                         )
+                        IconButton(
+                            onClick = { copyTextToClipboard(context, state.message) },
+                            modifier = Modifier.testTag("copy_extraction_error_button")
+                        ) {
+                            Icon(
+                                Icons.Rounded.ContentCopy,
+                                contentDescription = "Copiar mensagem de erro",
+                                tint = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        IconButton(onClick = onDismiss) {
+                            Icon(
+                                Icons.Rounded.Close,
+                                contentDescription = stringResource(R.string.cd_close),
+                                tint = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
                     }
-                    IconButton(onClick = onDismiss) {
-                        Icon(
-                            Icons.Rounded.Close,
-                            contentDescription = stringResource(R.string.cd_close),
-                            tint = MaterialTheme.colorScheme.onErrorContainer
-                        )
+                    if (state.canRetryWithCloud) {
+                        OutlinedButton(
+                            onClick = onRetryCloud,
+                            modifier = Modifier.testTag("retry_cloud_reserve_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.CloudQueue,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Tentar Nuvem (Reserva)")
+                        }
                     }
                 }
             }
