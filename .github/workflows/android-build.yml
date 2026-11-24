@@ -58,11 +58,13 @@ jobs:
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
-          if [ ! -f app/google-services.json ] && [ -n "$GOOGLE_SERVICES_JSON" ]; then
+          if [ -n "$GOOGLE_SERVICES_JSON" ]; then
             printf '%s\n' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+            echo "app/google-services.json configurado via Repository Secret."
           fi
-          if [ ! -f app/google-services.json ]; then
-            echo "::warning::app/google-services.json não encontrado no repositório. A leitura de NF por IA exigirá esse arquivo (ou o secret GOOGLE_SERVICES_JSON no GitHub)."
+          if [ ! -s app/google-services.json ] || ! grep -q "com.aistudio.frigstock.krmvqt" app/google-services.json; then
+            echo "::error::app/google-services.json ausente ou inválido! Copie o conteúdo de app/google-services.json do AI Studio e salve em Settings -> Secrets and variables -> Actions -> Repository secrets com o nome GOOGLE_SERVICES_JSON."
+            exit 1
           fi
 
       - name: Run domain unit tests
