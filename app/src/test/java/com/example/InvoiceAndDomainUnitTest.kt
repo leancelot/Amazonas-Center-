@@ -155,6 +155,16 @@ class InvoiceAndDomainUnitTest {
     }
 
     @Test
+    fun `thermal compliance evaluates critical and warning thresholds correctly`() {
+        assertEquals(ThermalCompliance.CRITICO, ThermalCompliance.evaluate(TemperatureZone.RESFRIADO, 8.5))
+        assertEquals(ThermalCompliance.ATENCAO, ThermalCompliance.evaluate(TemperatureZone.RESFRIADO, 5.5))
+        assertEquals(ThermalCompliance.CONFORME, ThermalCompliance.evaluate(TemperatureZone.RESFRIADO, 2.0))
+        assertEquals(ThermalCompliance.CRITICO, ThermalCompliance.evaluate(TemperatureZone.CONGELADO, -5.0))
+        assertEquals(ThermalCompliance.ATENCAO, ThermalCompliance.evaluate(TemperatureZone.CONGELADO, -15.0))
+        assertEquals(ThermalCompliance.CONFORME, ThermalCompliance.evaluate(TemperatureZone.CONGELADO, -20.0))
+    }
+
+    @Test
     fun `repository saves receiving session and processes atomic stock out and loss`() = runTest {
         val fakeDao = FakeColdStorageDao()
         val repository = ColdStorageRepository(fakeDao)

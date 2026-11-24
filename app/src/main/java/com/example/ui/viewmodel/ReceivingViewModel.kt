@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ColdStorageItemEntity
 import com.example.data.ColdStorageRepository
+import com.example.data.DateUtils
 import com.example.data.InvoiceSourceType
 import com.example.data.ReceivingSessionEntity
 import com.example.data.ReceivingSessionSummary
@@ -201,9 +202,15 @@ class ReceivingViewModel(
             val result = localExtractor.extractFromImageUri(context, uri)
             result.fold(
                 onSuccess = { draft ->
+                    lastRawOcrText = draft.rawOcrText
                     applyParsedDraft(draft, replaceItems = false)
+                    val warning = checkThermalConsistency(
+                        draft.items,
+                        draft.extractedTempCelsius ?: _formState.value.parsedTempCelsius,
+                        draft.items.firstOrNull()?.temperatureZone ?: _formState.value.targetZone
+                    )
                     _extractionState.value = ExtractionUiState.Success(
-                        message = buildLocalSuccessMessage("Foto lida offline", draft),
+                        message = buildLocalSuccessMessage("Foto lida offline", draft, warning),
                         rawOcrText = draft.rawOcrText,
                         canRetryWithCloud = true
                     )
@@ -226,9 +233,15 @@ class ReceivingViewModel(
             val result = localExtractor.extractFromPdfUri(context, uri)
             result.fold(
                 onSuccess = { draft ->
+                    lastRawOcrText = draft.rawOcrText
                     applyParsedDraft(draft, replaceItems = false)
+                    val warning = checkThermalConsistency(
+                        draft.items,
+                        draft.extractedTempCelsius ?: _formState.value.parsedTempCelsius,
+                        draft.items.firstOrNull()?.temperatureZone ?: _formState.value.targetZone
+                    )
                     _extractionState.value = ExtractionUiState.Success(
-                        message = buildLocalSuccessMessage("PDF lido offline", draft),
+                        message = buildLocalSuccessMessage("PDF lido offline", draft, warning),
                         rawOcrText = draft.rawOcrText,
                         canRetryWithCloud = true
                     )
@@ -243,7 +256,33 @@ class ReceivingViewModel(
         }
     }
 
+    private var lastRawOcrText: String = ""
+
     fun retryLastMediaWithCloudReserve(context: Context) {
+        val ocrText = lastRawOcrText
+        if (ocrText.isNotBlank()) {
+            viewModelScope.launch {
+                _extractionState.value = ExtractionUiState.Loading("Estruturando com IA na nuvem (modo texto eficiente)...")
+                val result = aiExtractor.extractFromOcrText(context, ocrText)
+                result.fold(
+                    onSuccess = { draft ->
+                        applyParsedDraft(draft, replaceItems = false)
+                        _extractionState.value = ExtractionUiState.Success(
+                            message = "Nuvem (reserva): ${draft.items.size} produto(s) estruturado(s) com sucesso. Revise antes de salvar."
+                        )
+                    },
+                    onFailure = { err ->
+                        _extractionState.value = ExtractionUiState.Error(
+                            message = err.localizedMessage ?: "Não foi possível consultar a IA na nuvem.",
+                            rawOcrText = ocrText,
+                            canRetryWithCloud = true
+                        )
+                    }
+                )
+            }
+            return
+        }
+
         val uri = lastMediaUri ?: return
         if (lastMediaIsPdf) {
             extractWithCloudReserveFromPdfUri(context, uri)
@@ -395,16 +434,36 @@ class ReceivingViewModel(
         }
     }
 
-    private fun buildLocalSuccessMessage(prefix: String, draft: ParsedInvoiceDraft): String {
+    private fun checkThermalConsistency(items: List<ParsedInvoiceItemDraft>, sessionTemp: Double?, targetZone: TemperatureZone): String? {
+        val sessionCompliance = sessionTemp?.let { ThermalCompliance.evaluate(targetZone, it) }
+        if (sessionCompliance == ThermalCompliance.CRITICO) {
+            return "⚠️ ALERTA CRÍTICO: Temperatura de chegada (${DateUtils.formatTemp(sessionTemp!!)}) fora do padrão para ${targetZone.displayName}!"
+        }
+        val criticalItems = items.filter { ThermalCompliance.evaluate(it.temperatureZone, it.measuredTempCelsius) == ThermalCompliance.CRITICO }
+        if (criticalItems.isNotEmpty()) {
+            return "⚠️ ATENÇÃO: ${criticalItems.size} lote(s) com temperatura crítica fora do padrão térmico."
+        }
+        val warningItems = items.filter { ThermalCompliance.evaluate(it.temperatureZone, it.measuredTempCelsius) == ThermalCompliance.ATENCAO }
+        if (warningItems.isNotEmpty()) {
+            return "⚠️ Nota: ${warningItems.size} lote(s) com temperatura em faixa de atenção."
+        }
+        if (sessionCompliance == ThermalCompliance.ATENCAO) {
+            return "⚠️ Nota: Temperatura de chegada em faixa de atenção."
+        }
+        return null
+    }
+
+    private fun buildLocalSuccessMessage(prefix: String, draft: ParsedInvoiceDraft, consistencyWarning: String?): String {
         val parts = mutableListOf<String>()
         if (draft.invoiceNumber.isNotBlank()) parts.add("NF ${draft.invoiceNumber}")
         parts.add("${draft.items.size} produto(s)")
         if (draft.extractedTempCelsius != null) parts.add("temp. detectada")
-        return if (draft.items.isEmpty()) {
-            "$prefix (${parts.joinToString(", ")}). Confira o texto OCR ou tente a reserva na nuvem se necessário."
+        val base = if (draft.items.isEmpty()) {
+            "$prefix (${parts.joinToString(", ")}). Confira o texto OCR."
         } else {
             "$prefix: ${parts.joinToString(", ")} preenchido(s). Revise antes de salvar."
         }
+        return if (consistencyWarning != null) "$base\n$consistencyWarning" else base
     }
 
     private fun applyParsedDraft(draft: ParsedInvoiceDraft, replaceItems: Boolean) {

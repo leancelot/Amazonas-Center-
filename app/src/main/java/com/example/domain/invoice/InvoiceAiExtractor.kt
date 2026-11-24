@@ -154,6 +154,33 @@ class InvoiceAiExtractor {
         }
     }
 
+    suspend fun extractFromOcrText(context: Context, rawText: String): Result<ParsedInvoiceDraft> {
+        return try {
+            if (!ensureFirebaseInitialized(context.applicationContext)) {
+                return Result.failure(IllegalStateException(MISSING_FIREBASE_CONFIG_MESSAGE))
+            }
+            if (rawText.isBlank()) {
+                return Result.failure(IllegalArgumentException("O texto OCR está vazio para enviar à IA."))
+            }
+
+            val requestContent = content {
+                text("Texto OCR extraído da nota fiscal:\n$rawText\n\n${buildPrompt()}")
+            }
+            val response = generateContentWithFallback(requestContent)
+            val jsonText = response.text
+                ?: return Result.failure(IllegalStateException("A IA não retornou conteúdo estruturado."))
+            Result.success(parseJsonToDraft(jsonText, InvoiceSourceType.IA_FOTO))
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "AI text extraction timed out", e)
+            Result.failure(IllegalStateException("Tempo limite excedido ao estruturar com IA."))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "AI text extraction failed", e)
+            Result.failure(IllegalStateException(formatAiFailureMessage("Falha na estruturação por IA", e)))
+        }
+    }
+
     private suspend fun generateContentWithFallback(requestContent: Content): GenerateContentResponse {
         return withTimeout(60_000L) {
             val attempts = listOf(

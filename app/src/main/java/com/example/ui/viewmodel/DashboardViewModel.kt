@@ -36,6 +36,7 @@ data class DashboardUiState(
     val activeLotCount: Int = 0,
     val expiredCount: Int = 0,
     val dueSoonCount: Int = 0,
+    val atRisk7DaysCount: Int = 0,
     val onTrackCount: Int = 0,
     val feedbackMessage: String? = null
 )
@@ -57,7 +58,8 @@ class DashboardViewModel(
         val dueSoonCount = items.count {
             it.urgency == ExpiryUrgency.VENCE_HOJE || it.urgency == ExpiryUrgency.CRITICO_3_DIAS
         }
-        val onTrackCount = items.size - expiredCount - dueSoonCount
+        val atRisk7DaysCount = items.count { it.urgency == ExpiryUrgency.ATENCAO_7_DIAS }
+        val onTrackCount = items.count { it.urgency == ExpiryUrgency.EM_DIA }
 
         val chamberSummaries = items
             .groupBy { it.chamberName.ifBlank { it.zoneEnum.defaultChamber } }
@@ -97,6 +99,7 @@ class DashboardViewModel(
             activeLotCount = items.size,
             expiredCount = expiredCount,
             dueSoonCount = dueSoonCount,
+            atRisk7DaysCount = atRisk7DaysCount,
             onTrackCount = onTrackCount,
             feedbackMessage = feedback
         )

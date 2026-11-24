@@ -125,6 +125,7 @@ fun DashboardScreen(
                 FefoSummaryRow(
                     expiredCount = state.expiredCount,
                     dueSoonCount = state.dueSoonCount,
+                    atRisk7DaysCount = state.atRisk7DaysCount,
                     onTrackCount = state.onTrackCount,
                     onCardClick = onNavigateToInventory
                 )
@@ -329,13 +330,14 @@ private fun HeroColdHeader(
 private fun FefoSummaryRow(
     expiredCount: Int,
     dueSoonCount: Int,
+    atRisk7DaysCount: Int,
     onTrackCount: Int,
     onCardClick: (UrgencyFilter) -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         StatUrgencyCard(
             count = expiredCount,
@@ -349,13 +351,23 @@ private fun FefoSummaryRow(
         )
         StatUrgencyCard(
             count = dueSoonCount,
-            label = "Até 3 dias",
+            label = "Até 3d",
             bgColor = if (isDark) StatusWarningAmberDarkBg else StatusWarningAmberBg,
             accentColor = if (isDark) Color(0xFFFCD34D) else StatusWarningAmber,
             onClick = { onCardClick(UrgencyFilter.DUE_SOON) },
             modifier = Modifier
                 .weight(1f)
                 .testTag("dashboard_due_soon_card")
+        )
+        StatUrgencyCard(
+            count = atRisk7DaysCount,
+            label = "Atenção 7d",
+            bgColor = if (isDark) Color(0xFF422006) else Color(0xFFFEF3C7),
+            accentColor = if (isDark) Color(0xFFFDE68A) else Color(0xFFD97706),
+            onClick = { onCardClick(UrgencyFilter.ON_TRACK) },
+            modifier = Modifier
+                .weight(1f)
+                .testTag("dashboard_at_risk_card")
         )
         StatUrgencyCard(
             count = onTrackCount,

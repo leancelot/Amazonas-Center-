@@ -99,19 +99,27 @@ object MeatCatalogMatcher {
     }
 
     private fun inferMeatType(norm: String): MeatType {
-        return when {
-            norm.containsAny("FRANGO", "AVE", "PEITO", "COXA", "SOBRECOXA", "SASSAMI", "TULIPA", "GALINHA", "PERU") ->
-                MeatType.AVES
-            norm.containsAny("SUIN", "PERNIL", "BISTECA", "COSTELINHA", "LOMBO", "PANCETA", "COPA LOMBO", "PORCO", "CARRE SUINO") ->
-                MeatType.SUINA
-            norm.containsAny("CORDEIRO", "OVIN", "CAPRIN", "CABRITO", "CARNEIRO") ->
-                MeatType.OVINA
-            norm.containsAny("PEIXE", "TILAPIA", "SALMAO", "BACALHAU", "CAMARAO", "MERLUZA", "ATUM", "PESCADA") ->
-                MeatType.PEIXES
-            norm.containsAny("LINGUICA", "CALABRESA", "BACON", "CHARQUE", "CARNE SECA", "SALSICHA", "HAMBURGUER", "PRESUNTO", "TOSCANA") ->
-                MeatType.EMBUTIDOS_OUTROS
-            else -> MeatType.BOVINA
+        val scores = mutableMapOf<MeatType, Int>()
+        MeatType.entries.forEach { scores[it] = 0 }
+
+        val keywords = mapOf(
+            MeatType.AVES to listOf("FRANGO", "AVE", "PEITO", "COXA", "SOBRECOXA", "SASSAMI", "TULIPA", "ASA", "GALINHA", "PERU", "FRG", "FRAN"),
+            MeatType.SUINA to listOf("SUIN", "PORCO", "PERNIL", "BISTECA", "COSTELINHA", "LOMBO", "PANCETA", "COPA LOMBO", "CARRE", "SUINO"),
+            MeatType.OVINA to listOf("CORDEIRO", "OVIN", "CAPRIN", "CABRITO", "CARNEIRO", "CORDEI"),
+            MeatType.PEIXES to listOf("PEIXE", "TILAPIA", "SALMAO", "BACALHAU", "CAMARAO", "MERLUZA", "ATUM", "PESCADA", "POSTA"),
+            MeatType.EMBUTIDOS_OUTROS to listOf("LINGUICA", "CALABRESA", "BACON", "CHARQUE", "CARNE SECA", "SALSICHA", "HAMBURGUER", "PRESUNTO", "TOSCANA", "LING", "ESPETA")
+        )
+
+        for ((meat, words) in keywords) {
+            for (word in words) {
+                if (norm.contains(word)) {
+                    scores[meat] = (scores[meat] ?: 0) + word.length
+                }
+            }
         }
+
+        val best = scores.maxByOrNull { it.value }
+        return if (best != null && best.value > 0) best.key else MeatType.BOVINA
     }
 
     private fun inferCutName(norm: String, meatType: MeatType, fallbackRaw: String): String {
@@ -122,35 +130,78 @@ object MeatCatalogMatcher {
                 return preset
             }
         }
-        // Check common abbreviations on Brazilian NF-e
-        val abbreviationMap = mapOf(
-            "CONTRA FILE" to "Contrafilé",
-            "CONTRA-FILE" to "Contrafilé",
-            "C. FILE" to "Contrafilé",
+
+        val synonymMap = mapOf(
+            "ALC" to "Alcatra",
+            "PIC" to "Picanha",
+            "CONTRA" to "Contrafilé",
             "C FILE" to "Contrafilé",
-            "FILE MIGNON" to "Filé Mignon",
+            "F MIGNON" to "Filé Mignon",
             "COXAO MOLE" to "Coxão Mole",
+            "COX MOLE" to "Coxão Mole",
+            "CHA DENTRO" to "Coxão Mole",
             "COXAO DURO" to "Coxão Duro",
-            "CHA DE DENTRO" to "Coxão Mole",
-            "CHA DE FORA" to "Coxão Duro",
-            "COSTELA MINGA" to "Costela",
-            "COSTELA PONTA" to "Costela",
-            "PONTA DE AGULHA" to "Costela",
-            "MIOLO ALCATRA" to "Alcatra",
-            "BIFE ANCHO" to "Ancho",
-            "BIFE CHORIZO" to "Chorizo",
-            "PEITO C/ OSSO" to "Peito de Frango",
-            "PEITO S/ OSSO" to "Filé de Peito",
-            "MEIO DA ASA" to "Meio da Asa (Tulipa)",
+            "COX DURO" to "Coxão Duro",
+            "CHA FORA" to "Coxão Duro",
+            "COST" to "Costela",
+            "ANCHO" to "Ancho",
+            "CHORIZO" to "Chorizo",
+            "PEITO" to "Peito de Frango",
+            "FILE PEITO" to "Filé de Peito",
+            "TULIPA" to "Meio da Asa (Tulipa)",
             "COXA SOBR" to "Coxa e Sobrecoxa",
-            "COXA/SOBR" to "Coxa e Sobrecoxa",
-            "CARNE MOIDA" to "Carne Moída",
+            "SOBRECOXA" to "Sobrecoxa",
+            "MOIDA" to "Carne Moída",
+            "PAT" to "Patinho",
+            "PATINHO" to "Patinho",
+            "ACEM" to "Acém",
+            "PALETA" to "Paleta",
+            "MUSCULO" to "Músculo",
             "LING TOSC" to "Linguiça Toscana",
-            "LING CALAB" to "Linguiça Calabresa"
+            "LING CALAB" to "Linguiça Calabresa",
+            "BACON" to "Bacon Manta"
         )
-        for ((key, value) in abbreviationMap) {
-            if (norm.contains(key)) return value
+
+        for ((syn, fullCut) in synonymMap) {
+            if (norm.contains(syn)) {
+                return fullCut
+            }
         }
+
+        val allCutsWithMeat = mutableListOf<String>()
+        MeatType.entries.forEach { m ->
+            allCutsWithMeat.addAll(m.presetCuts)
+        }
+
+        val normTokens = norm.split(Regex("""[\s\-/]+""")).filter { it.length >= 2 }
+        var bestCut = ""
+        var highestScore = 0
+
+        for (cut in allCutsWithMeat) {
+            val cutNorm = normalizeText(cut)
+            val cutTokens = cutNorm.split(Regex("""[\s\-/]+""")).filter { it.length >= 2 }
+            var score = 0
+
+            for (cTok in cutTokens) {
+                for (nTok in normTokens) {
+                    if (nTok == cTok) {
+                        score += cTok.length * 2
+                    } else if (nTok.startsWith(cTok) || cTok.startsWith(nTok)) {
+                        score += minOf(nTok.length, cTok.length)
+                    }
+                }
+            }
+
+            if (score > highestScore) {
+                highestScore = score
+                bestCut = cut
+            }
+        }
+
+        if (highestScore >= 4 && bestCut.isNotBlank()) {
+            return bestCut
+        }
+
         return fallbackRaw.trim()
             .replace(Regex("""\s+"""), " ")
             .take(40)
