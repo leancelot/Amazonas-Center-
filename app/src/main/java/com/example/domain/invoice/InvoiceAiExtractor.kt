@@ -102,7 +102,7 @@ class InvoiceAiExtractor {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "AI image extraction failed", e)
-            Result.failure(IllegalStateException("Falha na leitura por IA: ${e.localizedMessage ?: "erro de rede ou configuração"}"))
+            Result.failure(IllegalStateException(formatAiFailureMessage("Falha na leitura por IA", e)))
         }
     }
 
@@ -141,7 +141,21 @@ class InvoiceAiExtractor {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "AI PDF extraction failed", e)
-            Result.failure(IllegalStateException("Falha ao ler PDF com IA: ${e.localizedMessage ?: "erro de conexão"}"))
+            Result.failure(IllegalStateException(formatAiFailureMessage("Falha ao ler PDF com IA", e)))
+        }
+    }
+
+    private fun formatAiFailureMessage(prefix: String, error: Exception): String {
+        val rawMessage = error.localizedMessage?.takeIf { it.isNotBlank() } ?: "erro de rede ou configuração"
+        val isAppCheckError = rawMessage.contains("App Check", ignoreCase = true) ||
+            rawMessage.contains("AppCheck", ignoreCase = true) ||
+            rawMessage.contains("403")
+        return if (isAppCheckError) {
+            "$prefix: $rawMessage\n\n" +
+                "Causa provável: o APK de depuração (Debug) fora do AI Studio gera um token de debug não autorizado no Firebase App Check. " +
+                "Use o APK Release (compilado com reCAPTCHA) ou registre o token de debug no Console do Firebase (App Check)."
+        } else {
+            "$prefix: $rawMessage"
         }
     }
 
