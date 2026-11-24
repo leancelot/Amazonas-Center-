@@ -234,10 +234,10 @@ object LocalInvoiceOcrParser {
             "DANFE", "DOCUMENTO AUXILIAR", "CHAVE DE ACESSO", "NOTA FISCAL",
             "PROTOCOLO DE AUTORIZACAO", "NATUREZA DA OPERACAO", "DESTINATARIO",
             "INSCRICAO ESTADUAL", "CALCULO DO IMPOSTO", "DADOS DOS PRODUTOS",
-            "RECEBEMOS DE"
+            "RECEBEMOS", "PRODUTOS CONSTANTES", "INDICADA AO LADO", "IDENTIFICACAO", "ASSINATURA"
         )
 
-        val topRows = rows.take(22)
+        val topRows = rows.take(25)
         for (row in topRows) {
             val cleaned = cleanSupplierCandidate(row)
             val norm = MeatCatalogMatcher.normalizeText(cleaned)
@@ -248,34 +248,42 @@ object LocalInvoiceOcrParser {
             }
         }
 
-        // Check line after "RECEBEMOS DE ..."
-        for (row in topRows) {
-            val recebemos = Regex("""RECEBEMOS\s+DE\s+([A-Z0-9\s.&/\-]{4,60})""", RegexOption.IGNORE_CASE)
-                .find(row)?.groupValues?.getOrNull(1)
-            if (!recebemos.isNullOrBlank()) {
-                val cleaned = recebemos.substringBefore(" OS PRODUTOS").trim()
-                if (cleaned.length >= 4) return cleaned.take(64)
-            }
-        }
-
         // Explicit label "FORNECEDOR:" or "EMITENTE:"
         for (row in rows) {
             val labeled = Regex("""(?:FORNECEDOR|EMITENTE|FRIGOR[IÍ]FICO)\s*[:\-]\s*(.+)""", RegexOption.IGNORE_CASE)
                 .find(row)?.groupValues?.getOrNull(1)?.trim()
             if (!labeled.isNullOrBlank() && labeled.length >= 3) {
-                return cleanSupplierCandidate(labeled).take(64)
+                val cleaned = cleanSupplierCandidate(labeled)
+                if (cleaned.isNotBlank() && !cleaned.contains("RECEBEMOS", ignoreCase = true)) {
+                    return cleaned.take(64)
+                }
+            }
+        }
+
+        // Fallback to first non-ignored top row with company hint or LTDA
+        for (row in topRows) {
+            val cleaned = cleanSupplierCandidate(row)
+            val norm = MeatCatalogMatcher.normalizeText(cleaned)
+            if (cleaned.length >= 4 && !ignoredHeaders.any { norm.contains(it) } && !norm.contains("RECEBEMOS")) {
+                if (companyHints.any { norm.contains(it) } || cleaned.contains("LTDA", ignoreCase = true)) {
+                    return cleaned.take(64)
+                }
             }
         }
         return ""
     }
 
     private fun cleanSupplierCandidate(row: String): String {
+        val norm = MeatCatalogMatcher.normalizeText(row)
+        if (norm.contains("RECEBEMOS") || norm.contains("PRODUTOS CONSTANTES") || norm.contains("NOTA FISCAL") || norm.contains("INDICADA AO LADO")) {
+            return ""
+        }
         return row
-            .replace(Regex("""^(?:FORNECEDOR|EMITENTE)\s*[:\-]\s*""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""^(?:FORNECEDOR|EMITENTE|EMITENTE\s*/\s*REMETENTE|RECEBEMOS\s+DE)\s*[:\-]?\s*""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\bCNPJ[:\s]*\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\b(?:TEL|FONE|CEP|IE|INSC\.?\s*EST\.?)[:\s].*$""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\s+"""), " ")
-            .trim(' ', '-', ':', '|', '•')
+            .trim(' ', '-', ':', '|', '•', '"', '\'')
     }
 
     private fun extractAnnotationsAndTemp(rows: List<String>): Pair<String, Double?> {
@@ -349,7 +357,8 @@ object LocalInvoiceOcrParser {
             "DESCRICAO DO PRODUTO", "RAZAO SOCIAL", "CHAVE DE ACESSO",
             "PROTOCOLO DE AUTORIZACAO", "ENDERECO", "MUNICIPIO", "TRANSPORTADOR",
             "DADOS ADICIONAIS", "INFORMACOES COMPLEMENTARES", "RESERVADO AO FISCO",
-            "INSCRICAO ESTADUAL", "NATUREZA DA OPERACAO", "PESO BRUTO", "PESO LIQUIDO"
+            "INSCRICAO ESTADUAL", "NATUREZA DA OPERACAO", "PESO BRUTO", "PESO LIQUIDO",
+            "CFOP", "CST", "NCM", "ICMS", "PIS", "COFINS", "IPI", "ALIQ", "VALOR"
         )
 
         val unitQtyRegex = Regex(
@@ -374,6 +383,7 @@ object LocalInvoiceOcrParser {
             }
 
             if (ignoredRowKeywords.any { norm.contains(it) }) continue
+            if (norm.contains("CFOP") || norm.contains("NCM")) continue
 
             // Check if this is a metadata sub-line for the previous item (LOTE / SIF / VAL / OBS)
             if (items.isNotEmpty() && isMetadataContinuationRow(rawRow, norm, unitQtyRegex, qtyAfterUnitRegex)) {
@@ -454,11 +464,12 @@ object LocalInvoiceOcrParser {
 
         val cleanedDesc = cleanProductDescription(prefixText.ifBlank { suffixText })
         if (cleanedDesc.length < 3 || cleanedDesc.all { it.isDigit() || !it.isLetter() }) return null
+        if (cleanedDesc.matches(Regex("""^[1-7]\d{3}$""")) || cleanedDesc.matches(Regex("""^\d{8}$"""))) return null
 
         // Avoid matching tax/weight summary lines like "120,00 KG PESO LIQUIDO"
         val descNorm = MeatCatalogMatcher.normalizeText(cleanedDesc)
         if (descNorm.contains("PESO") || descNorm.contains("VOLUME") || descNorm.contains("ESPECIE") ||
-            descNorm.contains("FRETE") || descNorm.contains("TOTAL")
+            descNorm.contains("FRETE") || descNorm.contains("TOTAL") || descNorm.contains("CFOP") || descNorm.contains("NCM")
         ) {
             return null
         }
@@ -507,10 +518,10 @@ object LocalInvoiceOcrParser {
         return raw
             .replace(Regex("""^\d{1,14}\s+"""), "") // leading product SKU
             .replace(Regex("""\b\d{8}\b"""), "") // NCM 8-digit code
-            .replace(Regex("""\b[0-9]{1,3}\s+[0-9]{4}\b"""), "") // CST + CFOP
-            .replace(Regex("""\b(?:SIF|LOTE|VAL(?:IDADE)?)[:\s-]*[A-Z0-9./-]+\b""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\b[1-7]\.?\d{3}\b"""), "") // CFOP 4 digits
+            .replace(Regex("""\b(?:CFOP|CST|NCM|UN|KG)[:\s-]*[A-Z0-9./-]*\b""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\s+"""), " ")
-            .trim(' ', '-', '|', ':', '.', ',')
+            .trim(' ', '-', ':', '.', ',')
     }
 
     private fun extractPricesFromSuffix(suffix: String): List<Double> {
