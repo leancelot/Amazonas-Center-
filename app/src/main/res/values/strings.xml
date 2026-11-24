@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">Amazonas Center</string>
+    <string name="nav_dashboard">Painel</string>
+    <string name="nav_receiving">Receber</string>
+    <string name="nav_inventory">Estoque</string>
+    <string name="nav_reports">Relatórios</string>
+    <string name="cd_close">Fechar</string>
+    <string name="cd_back">Voltar</string>
+    <string name="cd_search">Buscar</string>
+    <string name="cd_clear_search">Limpar busca</string>
+    <string name="cd_scan_qr">Ler QR ou código de barras da nota fiscal</string>
+    <string name="cd_add_manual">Adicionar corte manualmente</string>
+    <string name="cd_export_report">Compartilhar relatório de conferência</string>
+</resources>

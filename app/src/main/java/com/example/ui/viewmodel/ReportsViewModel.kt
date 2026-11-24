@@ -1,0 +1,207 @@
+package com.example.ui.viewmodel
+
+import android.content.Context
+import android.net.Uri
+import androidx.core.content.FileProvider
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.data.ColdStorageItemEntity
+import com.example.data.ColdStorageRepository
+import com.example.data.DateUtils
+import com.example.data.MeatType
+import com.example.data.MeasurementUnit
+import com.example.data.MovementType
+import com.example.data.StockMovementEntity
+import com.example.data.TemperatureZone
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import java.io.File
+
+enum class ReportPeriod(val label: String, val days: Int?) {
+    DAYS_7("7 dias", 7),
+    DAYS_30("30 dias", 30),
+    ALL("Todo período", null)
+}
+
+data class MeatStockBreakdown(
+    val meatType: MeatType,
+    val lotCount: Int,
+    val totalKg: Double,
+    val sharePercent: Float
+)
+
+data class ZoneStockBreakdown(
+    val zone: TemperatureZone,
+    val lotCount: Int,
+    val totalKg: Double
+)
+
+data class LossReasonBreakdown(
+    val movementType: MovementType,
+    val count: Int,
+    val totalKg: Double,
+    val totalBrl: Double
+)
+
+data class ReportsUiState(
+    val period: ReportPeriod = ReportPeriod.DAYS_30,
+    val totalStockKg: Double = 0.0,
+    val totalActiveLots: Int = 0,
+    val totalOutgoingKg: Double = 0.0,
+    val totalLossKg: Double = 0.0,
+    val totalLossBrl: Double = 0.0,
+    val lossRatePercent: Double = 0.0,
+    val meatBreakdown: List<MeatStockBreakdown> = emptyList(),
+    val zoneBreakdown: List<ZoneStockBreakdown> = emptyList(),
+    val lossReasons: List<LossReasonBreakdown> = emptyList(),
+    val recentMovements: List<StockMovementEntity> = emptyList(),
+    val activeItemsSnapshot: List<ColdStorageItemEntity> = emptyList()
+)
+
+class ReportsViewModel(
+    private val repository: ColdStorageRepository
+) : ViewModel() {
+
+    private val _period = MutableStateFlow(ReportPeriod.DAYS_30)
+
+    val uiState: StateFlow<ReportsUiState> = combine(
+        repository.activeItemsFefo,
+        repository.allMovements,
+        _period
+    ) { activeItems, allMovements, period ->
+        val cutoffMillis = period.days?.let { days ->
+            System.currentTimeMillis() - (days.toLong() * 86_400_000L)
+        } ?: 0L
+
+        val periodMovements = allMovements.filter { it.createdAtMillis >= cutoffMillis }
+        val totalStockKg = activeItems.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.currentQuantity }
+
+        val outgoingKg = periodMovements
+            .filter { it.movementTypeEnum.isOutgoing && !it.movementTypeEnum.isLoss && it.unitEnum == MeasurementUnit.KG }
+            .sumOf { it.quantity }
+
+        val lossMovements = periodMovements.filter { it.movementTypeEnum.isLoss }
+        val totalLossKg = lossMovements.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.quantity }
+        val totalLossBrl = lossMovements.sumOf { it.estimatedLossBrl }
+
+        val totalMovedKg = outgoingKg + totalLossKg
+        val lossRate = if (totalMovedKg > 0.0) (totalLossKg / totalMovedKg) * 100.0 else 0.0
+
+        val meatGroups = activeItems.groupBy { it.meatTypeEnum }
+            .map { (meat, list) ->
+                val kg = list.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.currentQuantity }
+                MeatStockBreakdown(
+                    meatType = meat,
+                    lotCount = list.size,
+                    totalKg = kg,
+                    sharePercent = if (totalStockKg > 0.0) (kg / totalStockKg).toFloat() else 0f
+                )
+            }
+            .sortedByDescending { it.totalKg }
+
+        val zoneGroups = activeItems.groupBy { it.zoneEnum }
+            .map { (zone, list) ->
+                ZoneStockBreakdown(
+                    zone = zone,
+                    lotCount = list.size,
+                    totalKg = list.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.currentQuantity }
+                )
+            }
+            .sortedByDescending { it.totalKg }
+
+        val lossByReason = lossMovements.groupBy { it.movementTypeEnum }
+            .map { (type, list) ->
+                LossReasonBreakdown(
+                    movementType = type,
+                    count = list.size,
+                    totalKg = list.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.quantity },
+                    totalBrl = list.sumOf { it.estimatedLossBrl }
+                )
+            }
+            .sortedByDescending { it.totalKg }
+
+        ReportsUiState(
+            period = period,
+            totalStockKg = totalStockKg,
+            totalActiveLots = activeItems.size,
+            totalOutgoingKg = outgoingKg,
+            totalLossKg = totalLossKg,
+            totalLossBrl = totalLossBrl,
+            lossRatePercent = lossRate,
+            meatBreakdown = meatGroups,
+            zoneBreakdown = zoneGroups,
+            lossReasons = lossByReason,
+            recentMovements = periodMovements.take(30),
+            activeItemsSnapshot = activeItems
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = ReportsUiState()
+    )
+
+    fun setPeriod(period: ReportPeriod) {
+        _period.value = period
+    }
+
+    fun buildTextSummary(): String {
+        val state = uiState.value
+        val sb = StringBuilder()
+        sb.appendLine("RELATÓRIO DE CONFERÊNCIA — AMAZONAS CENTER (${state.period.label})")
+        sb.appendLine("Gerado em: ${DateUtils.formatDateTime(System.currentTimeMillis())}")
+        sb.appendLine("----------------------------------------")
+        sb.appendLine("Estoque Atual: ${String.format("%.2f", state.totalStockKg)} kg (${state.totalActiveLots} lotes)")
+        sb.appendLine("Saídas p/ Balcão/Desossa: ${String.format("%.2f", state.totalOutgoingKg)} kg")
+        sb.appendLine("Perdas no Período: ${String.format("%.2f", state.totalLossKg)} kg (${DateUtils.formatCurrencyBrl(state.totalLossBrl)})")
+        sb.appendLine("Índice de Quebra: ${String.format("%.1f", state.lossRatePercent)}%")
+        sb.appendLine()
+        sb.appendLine("ESTOQUE POR TIPO DE CARNE:")
+        state.meatBreakdown.forEach {
+            sb.appendLine("- ${it.meatType.displayName}: ${String.format("%.2f", it.totalKg)} kg (${it.lotCount} lotes)")
+        }
+        if (state.lossReasons.isNotEmpty()) {
+            sb.appendLine()
+            sb.appendLine("DETALHAMENTO DE PERDAS:")
+            state.lossReasons.forEach {
+                sb.appendLine("- ${it.movementType.displayName}: ${String.format("%.2f", it.totalKg)} kg (${it.count}x)")
+            }
+        }
+        return sb.toString()
+    }
+
+    fun createConferenceCsvUri(context: Context): Uri? {
+        return try {
+            val state = uiState.value
+            val dir = File(context.cacheDir, "reports").apply { mkdirs() }
+            val file = File(dir, "conferencia_camara_${System.currentTimeMillis()}.csv")
+            val csv = buildString {
+                appendLine("Tipo;Corte;Zona;Temp_C;Camara;Saldo;Unidade;Validade;Lote;SIF;Fornecedor;NF")
+                state.activeItemsSnapshot.forEach { item ->
+                    appendLine(
+                        listOf(
+                            item.meatTypeEnum.displayName,
+                            item.cutName,
+                            item.zoneEnum.displayName,
+                            item.measuredTempCelsius.toString(),
+                            item.chamberName,
+                            String.format("%.2f", item.currentQuantity),
+                            item.unitEnum.shortLabel,
+                            DateUtils.formatEpochDay(item.expiryDateEpochDay),
+                            item.batchCode,
+                            item.sifCode,
+                            item.supplierName,
+                            item.invoiceNumber
+                        ).joinToString(";") { cell -> cell.replace(";", ",") }
+                    )
+                }
+            }
+            file.writeText(csv, Charsets.UTF_8)
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        } catch (_: Exception) {
+            null
+        }
+    }
+}

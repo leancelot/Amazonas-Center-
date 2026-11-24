@@ -1,0 +1,6 @@
+{
+  "name": "Amazonas Center",
+  "description": "Controle inteligente de câmara fria para açougue com leitura de nota fiscal, controle de validade FEFO e relatórios de estoque e perdas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
