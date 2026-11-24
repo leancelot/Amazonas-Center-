@@ -9,13 +9,17 @@ import com.example.data.DateUtils
 import com.example.data.InvoiceSourceType
 import com.google.firebase.Firebase
 import com.google.firebase.FirebaseApp
+import com.google.firebase.ai.GenerativeModel
 import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.Content
+import com.google.firebase.ai.type.GenerateContentResponse
 import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -64,9 +68,17 @@ class InvoiceAiExtractor {
         optionalProperties = listOf("invoiceNumber", "accessKey", "supplierName", "supplierCnpj")
     )
 
-    private val model by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
+    private val primaryModel by lazy {
+        createGenerativeModel("gemini-3.8-flash")
+    }
+
+    private val fallbackModel by lazy {
+        createGenerativeModel("gemini-3.5-flash-lite")
+    }
+
+    private fun createGenerativeModel(modelName: String): GenerativeModel {
+        return Firebase.ai.generativeModel(
+            modelName = modelName,
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
                 responseSchema = invoiceSchema
@@ -84,14 +96,11 @@ class InvoiceAiExtractor {
                 decodeAndScaleBitmap(context, imageUri, maxDimension = 1600)
             } ?: return Result.failure(IllegalArgumentException("Não foi possível abrir a imagem selecionada."))
 
-            val response = withTimeout(60_000L) {
-                model.generateContent(
-                    content {
-                        image(bitmap)
-                        text(buildPrompt())
-                    }
-                )
+            val requestContent = content {
+                image(bitmap)
+                text(buildPrompt())
             }
+            val response = generateContentWithFallback(requestContent)
             val jsonText = response.text
                 ?: return Result.failure(IllegalStateException("A IA não retornou conteúdo para esta nota."))
             Result.success(parseJsonToDraft(jsonText, InvoiceSourceType.IA_FOTO))
@@ -123,14 +132,11 @@ class InvoiceAiExtractor {
                 return Result.failure(IllegalArgumentException("O PDF excede o limite de 18 MB para leitura automática."))
             }
 
-            val response = withTimeout(60_000L) {
-                model.generateContent(
-                    content {
-                        inlineData(pdfBytes, "application/pdf")
-                        text(buildPrompt())
-                    }
-                )
+            val requestContent = content {
+                inlineData(pdfBytes, "application/pdf")
+                text(buildPrompt())
             }
+            val response = generateContentWithFallback(requestContent)
             val jsonText = response.text
                 ?: return Result.failure(IllegalStateException("A IA não retornou conteúdo para este PDF."))
             Result.success(parseJsonToDraft(jsonText, InvoiceSourceType.IA_PDF))
@@ -145,17 +151,65 @@ class InvoiceAiExtractor {
         }
     }
 
+    private suspend fun generateContentWithFallback(requestContent: Content): GenerateContentResponse {
+        return withTimeout(60_000L) {
+            val attempts = listOf(
+                primaryModel to 0L,
+                fallbackModel to 800L,
+                primaryModel to 1500L
+            )
+            var lastError: Exception? = null
+            for ((index, attempt) in attempts.withIndex()) {
+                val (candidateModel, delayMs) = attempt
+                if (delayMs > 0L) {
+                    delay(delayMs)
+                }
+                try {
+                    return@withTimeout candidateModel.generateContent(requestContent)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    lastError = e
+                    val hasMoreAttempts = index < attempts.lastIndex
+                    if (!hasMoreAttempts || !isTransientCapacityError(e)) {
+                        throw e
+                    }
+                    Log.w(TAG, "Transient AI capacity error on attempt ${index + 1}, retrying/falling back", e)
+                }
+            }
+            throw (lastError ?: IllegalStateException("Falha desconhecida ao consultar a IA."))
+        }
+    }
+
+    private fun isTransientCapacityError(error: Exception): Boolean {
+        val msg = error.localizedMessage.orEmpty()
+        return msg.contains("high demand", ignoreCase = true) ||
+            msg.contains("overloaded", ignoreCase = true) ||
+            msg.contains("temporarily unavailable", ignoreCase = true) ||
+            msg.contains("try again later", ignoreCase = true) ||
+            msg.contains("503") ||
+            msg.contains("429") ||
+            msg.contains("UNAVAILABLE", ignoreCase = true) ||
+            msg.contains("RESOURCE_EXHAUSTED", ignoreCase = true)
+    }
+
     private fun formatAiFailureMessage(prefix: String, error: Exception): String {
         val rawMessage = error.localizedMessage?.takeIf { it.isNotBlank() } ?: "erro de rede ou configuração"
         val isAppCheckError = rawMessage.contains("App Check", ignoreCase = true) ||
             rawMessage.contains("AppCheck", ignoreCase = true) ||
             rawMessage.contains("403")
-        return if (isAppCheckError) {
-            "$prefix: $rawMessage\n\n" +
-                "Causa provável: o APK de depuração (Debug) fora do AI Studio gera um token de debug não autorizado no Firebase App Check. " +
-                "Use o APK Release (compilado com reCAPTCHA) ou registre o token de debug no Console do Firebase (App Check)."
-        } else {
-            "$prefix: $rawMessage"
+        return when {
+            isAppCheckError -> {
+                "$prefix: $rawMessage\n\n" +
+                    "Causa provável: o APK de depuração (Debug) fora do AI Studio gera um token de debug não autorizado no Firebase App Check. " +
+                    "Use o APK Release (compilado com reCAPTCHA) ou registre o token de debug no Console do Firebase (App Check)."
+            }
+            isTransientCapacityError(error) -> {
+                "$prefix: $rawMessage\n\n" +
+                    "O servidor da IA está com pico temporário de demanda no momento. " +
+                    "Aguarde alguns segundos e tente novamente (ou utilize a importação via XML NF-e ou leitor QR/DANFE offline)."
+            }
+            else -> "$prefix: $rawMessage"
         }
     }
 
