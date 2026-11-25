@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
 import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
@@ -147,9 +146,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             FrigStockTheme {
-                SelectionContainer {
-                    AppNavigation()
-                }
+                AppNavigation()
             }
         }
     }
