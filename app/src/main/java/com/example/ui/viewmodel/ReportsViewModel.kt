@@ -27,8 +27,30 @@ enum class ReportPeriod(val label: String, val days: Int?) {
     ALL("Todo período", null)
 }
 
+enum class ReportStockGrouping(val label: String) {
+    MEAT_TYPE("Tipo de Carne"),
+    SUPPLIER("Frigorífico"),
+    EXPIRY("Validade")
+}
+
 data class MeatStockBreakdown(
     val meatType: MeatType,
+    val lotCount: Int,
+    val totalKg: Double,
+    val sharePercent: Float
+)
+
+data class SupplierStockBreakdown(
+    val supplierName: String,
+    val lotCount: Int,
+    val totalKg: Double,
+    val sharePercent: Float
+)
+
+data class ExpiryStockBreakdown(
+    val label: String,
+    val isUrgent: Boolean,
+    val isWarning: Boolean,
     val lotCount: Int,
     val totalKg: Double,
     val sharePercent: Float
@@ -49,6 +71,7 @@ data class LossReasonBreakdown(
 
 data class ReportsUiState(
     val period: ReportPeriod = ReportPeriod.DAYS_30,
+    val stockGrouping: ReportStockGrouping = ReportStockGrouping.MEAT_TYPE,
     val totalStockKg: Double = 0.0,
     val totalStockOtherUnits: Int = 0,
     val totalActiveLots: Int = 0,
@@ -57,6 +80,8 @@ data class ReportsUiState(
     val totalLossBrl: Double = 0.0,
     val lossRatePercent: Double = 0.0,
     val meatBreakdown: List<MeatStockBreakdown> = emptyList(),
+    val supplierBreakdown: List<SupplierStockBreakdown> = emptyList(),
+    val expiryBreakdown: List<ExpiryStockBreakdown> = emptyList(),
     val zoneBreakdown: List<ZoneStockBreakdown> = emptyList(),
     val lossReasons: List<LossReasonBreakdown> = emptyList(),
     val recentMovements: List<StockMovementEntity> = emptyList(),
@@ -68,12 +93,14 @@ class ReportsViewModel(
 ) : ViewModel() {
 
     private val _period = MutableStateFlow(ReportPeriod.DAYS_30)
+    private val _stockGrouping = MutableStateFlow(ReportStockGrouping.MEAT_TYPE)
 
     val uiState: StateFlow<ReportsUiState> = combine(
         repository.activeItemsFefo,
         repository.allMovements,
-        _period
-    ) { activeItems, allMovements, period ->
+        _period,
+        _stockGrouping
+    ) { activeItems, allMovements, period, grouping ->
         val cutoffMillis = period.days?.let { days ->
             System.currentTimeMillis() - (days.toLong() * 86_400_000L)
         } ?: 0L
@@ -105,6 +132,40 @@ class ReportsViewModel(
             }
             .sortedByDescending { it.totalKg }
 
+        val supplierGroups = activeItems.groupBy {
+            it.supplierName.trim().ifBlank { "Fornecedor não informado" }
+        }
+            .map { (supplier, list) ->
+                val kg = list.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.currentQuantity }
+                SupplierStockBreakdown(
+                    supplierName = supplier,
+                    lotCount = list.size,
+                    totalKg = kg,
+                    sharePercent = if (totalStockKg > 0.0) (kg / totalStockKg).toFloat() else 0f
+                )
+            }
+            .sortedByDescending { it.totalKg }
+
+        val expiryBuckets = listOf(
+            Triple("Vencidos", true to false) { days: Int -> days < 0 },
+            Triple("Crítico (0 a 2 dias)", true to false) { days: Int -> days in 0..2 },
+            Triple("Atenção (3 a 7 dias)", false to true) { days: Int -> days in 3..7 },
+            Triple("Seguro (> 7 dias)", false to false) { days: Int -> days > 7 }
+        ).mapNotNull { (label, flags, predicate) ->
+            val list = activeItems.filter { predicate(DateUtils.daysUntil(it.expiryDateEpochDay)) }
+            if (list.isEmpty()) null else {
+                val kg = list.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.currentQuantity }
+                ExpiryStockBreakdown(
+                    label = label,
+                    isUrgent = flags.first,
+                    isWarning = flags.second,
+                    lotCount = list.size,
+                    totalKg = kg,
+                    sharePercent = if (totalStockKg > 0.0) (kg / totalStockKg).toFloat() else 0f
+                )
+            }
+        }
+
         val zoneGroups = activeItems.groupBy { it.zoneEnum }
             .map { (zone, list) ->
                 ZoneStockBreakdown(
@@ -128,6 +189,7 @@ class ReportsViewModel(
 
         ReportsUiState(
             period = period,
+            stockGrouping = grouping,
             totalStockKg = totalStockKg,
             totalStockOtherUnits = totalStockOtherUnits,
             totalActiveLots = activeItems.size,
@@ -136,6 +198,8 @@ class ReportsViewModel(
             totalLossBrl = totalLossBrl,
             lossRatePercent = lossRate,
             meatBreakdown = meatGroups,
+            supplierBreakdown = supplierGroups,
+            expiryBreakdown = expiryBuckets,
             zoneBreakdown = zoneGroups,
             lossReasons = lossByReason,
             recentMovements = periodMovements.take(30),
@@ -151,6 +215,10 @@ class ReportsViewModel(
         _period.value = period
     }
 
+    fun setStockGrouping(grouping: ReportStockGrouping) {
+        _stockGrouping.value = grouping
+    }
+
     fun buildTextSummary(): String {
         val state = uiState.value
         val ptBr = Locale.forLanguageTag("pt-BR")
@@ -163,10 +231,31 @@ class ReportsViewModel(
         sb.appendLine("Saídas p/ Balcão/Desossa: ${String.format(ptBr, "%.2f", state.totalOutgoingKg)} kg")
         sb.appendLine("Perdas no Período: ${String.format(ptBr, "%.2f", state.totalLossKg)} kg (${DateUtils.formatCurrencyBrl(state.totalLossBrl)})")
         sb.appendLine("Índice de Quebra: ${String.format(ptBr, "%.1f", state.lossRatePercent)}%")
+        if (state.zoneBreakdown.isNotEmpty()) {
+            sb.appendLine()
+            sb.appendLine("POR ARMAZENAMENTO:")
+            state.zoneBreakdown.forEach {
+                sb.appendLine("- ${it.zone.displayName}: ${String.format(ptBr, "%.2f", it.totalKg)} kg (${it.lotCount} lotes)")
+            }
+        }
         sb.appendLine()
         sb.appendLine("ESTOQUE POR TIPO DE CARNE:")
         state.meatBreakdown.forEach {
             sb.appendLine("- ${it.meatType.displayName}: ${String.format(ptBr, "%.2f", it.totalKg)} kg (${it.lotCount} lotes)")
+        }
+        if (state.supplierBreakdown.isNotEmpty()) {
+            sb.appendLine()
+            sb.appendLine("ESTOQUE POR FRIGORÍFICO:")
+            state.supplierBreakdown.forEach {
+                sb.appendLine("- ${it.supplierName}: ${String.format(ptBr, "%.2f", it.totalKg)} kg (${it.lotCount} lotes)")
+            }
+        }
+        if (state.expiryBreakdown.isNotEmpty()) {
+            sb.appendLine()
+            sb.appendLine("ESTOQUE POR VALIDADE (FEFO):")
+            state.expiryBreakdown.forEach {
+                sb.appendLine("- ${it.label}: ${String.format(ptBr, "%.2f", it.totalKg)} kg (${it.lotCount} lotes)")
+            }
         }
         if (state.lossReasons.isNotEmpty()) {
             sb.appendLine()

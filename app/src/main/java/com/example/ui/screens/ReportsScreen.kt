@@ -42,7 +42,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.DateUtils
 import com.example.ui.theme.JetBrainsMonoFamily
+import com.example.ui.theme.StatusWarningAmber
 import com.example.ui.viewmodel.ReportPeriod
+import com.example.ui.viewmodel.ReportStockGrouping
 import com.example.ui.viewmodel.ReportsViewModel
 import java.util.Locale
 
@@ -158,6 +160,41 @@ fun ReportsScreen(
                 }
             }
 
+            if (state.zoneBreakdown.isNotEmpty()) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        val ptBr = Locale.forLanguageTag("pt-BR")
+                        state.zoneBreakdown.forEach { zb ->
+                            OutlinedCard(modifier = Modifier.weight(1f)) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Text(
+                                        text = zb.zone.displayName,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = String.format(ptBr, "%.1f kg", zb.totalKg),
+                                        style = MaterialTheme.typography.titleMedium.copy(fontFamily = JetBrainsMonoFamily),
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "${zb.lotCount} lotes",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             item {
                 OutlinedCard(modifier = Modifier.fillMaxWidth()) {
                     Column(
@@ -165,53 +202,85 @@ fun ReportsScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Text(
-                            text = "Distribuição por Tipo de Carne",
+                            text = "Categorizar Estoque Por:",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
-                        if (state.meatBreakdown.isEmpty()) {
-                            Text(
-                                text = "Sem itens ativos para exibir.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        } else {
-                            val barColor = MaterialTheme.colorScheme.secondary
-                            val trackColor = MaterialTheme.colorScheme.surfaceVariant
-                            state.meatBreakdown.forEach { row ->
-                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Text(
-                                            text = "${row.meatType.displayName} (${row.lotCount} lotes)",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                        Text(
-                                            text = String.format(Locale.forLanguageTag("pt-BR"), "%.1f kg", row.totalKg),
-                                            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFamily)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ReportStockGrouping.entries.forEach { grouping ->
+                                FilterChip(
+                                    selected = state.stockGrouping == grouping,
+                                    onClick = { viewModel.setStockGrouping(grouping) },
+                                    label = { Text(grouping.label) },
+                                    modifier = Modifier.testTag("report_grouping_${grouping.name.lowercase()}")
+                                )
+                            }
+                        }
+
+                        val ptBr = Locale.forLanguageTag("pt-BR")
+                        val trackColor = MaterialTheme.colorScheme.surfaceVariant
+                        val defaultBarColor = MaterialTheme.colorScheme.secondary
+
+                        when (state.stockGrouping) {
+                            ReportStockGrouping.MEAT_TYPE -> {
+                                if (state.meatBreakdown.isEmpty()) {
+                                    Text(
+                                        text = "Sem itens ativos para exibir.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                } else {
+                                    state.meatBreakdown.forEach { row ->
+                                        ReportBreakdownRow(
+                                            label = "${row.meatType.displayName} (${row.lotCount} lotes)",
+                                            value = String.format(ptBr, "%.1f kg", row.totalKg),
+                                            share = row.sharePercent,
+                                            barColor = defaultBarColor,
+                                            trackColor = trackColor
                                         )
                                     }
-                                    Canvas(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(10.dp)
-                                    ) {
-                                        drawRoundRect(
-                                            color = trackColor,
-                                            size = size,
-                                            cornerRadius = CornerRadius(8f, 8f)
+                                }
+                            }
+                            ReportStockGrouping.SUPPLIER -> {
+                                if (state.supplierBreakdown.isEmpty()) {
+                                    Text(
+                                        text = "Sem frigoríficos registrados no estoque ativo.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                } else {
+                                    state.supplierBreakdown.forEach { row ->
+                                        ReportBreakdownRow(
+                                            label = "${row.supplierName} (${row.lotCount} lotes)",
+                                            value = String.format(ptBr, "%.1f kg", row.totalKg),
+                                            share = row.sharePercent,
+                                            barColor = MaterialTheme.colorScheme.primary,
+                                            trackColor = trackColor
                                         )
-                                        val fillWidth = (size.width * row.sharePercent.coerceIn(0f, 1f))
-                                        if (fillWidth > 0f) {
-                                            drawRoundRect(
-                                                color = barColor,
-                                                size = Size(fillWidth, size.height),
-                                                cornerRadius = CornerRadius(8f, 8f)
-                                            )
+                                    }
+                                }
+                            }
+                            ReportStockGrouping.EXPIRY -> {
+                                if (state.expiryBreakdown.isEmpty()) {
+                                    Text(
+                                        text = "Sem lotes ativos para análise de validade.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                } else {
+                                    state.expiryBreakdown.forEach { row ->
+                                        val barColor = when {
+                                            row.isUrgent -> MaterialTheme.colorScheme.error
+                                            row.isWarning -> StatusWarningAmber
+                                            else -> defaultBarColor
                                         }
+                                        ReportBreakdownRow(
+                                            label = "${row.label} (${row.lotCount} lotes)",
+                                            value = String.format(ptBr, "%.1f kg", row.totalKg),
+                                            share = row.sharePercent,
+                                            barColor = barColor,
+                                            trackColor = trackColor
+                                        )
                                     }
                                 }
                             }
@@ -369,6 +438,53 @@ private fun ReportKpiCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = if (isError) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+    }
+}
+
+@Composable
+private fun ReportBreakdownRow(
+    label: String,
+    value: String,
+    share: Float,
+    barColor: androidx.compose.ui.graphics.Color,
+    trackColor: androidx.compose.ui.graphics.Color
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFamily)
+            )
+        }
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(10.dp)
+        ) {
+            drawRoundRect(
+                color = trackColor,
+                size = size,
+                cornerRadius = CornerRadius(8f, 8f)
+            )
+            val fillWidth = (size.width * share.coerceIn(0f, 1f))
+            if (fillWidth > 0f) {
+                drawRoundRect(
+                    color = barColor,
+                    size = Size(fillWidth, size.height),
+                    cornerRadius = CornerRadius(8f, 8f)
+                )
+            }
         }
     }
 }

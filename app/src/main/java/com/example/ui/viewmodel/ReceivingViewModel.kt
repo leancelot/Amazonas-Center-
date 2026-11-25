@@ -512,6 +512,44 @@ class ReceivingViewModel(
         }
     }
 
+    fun addQuickEntryItem(
+        supplier: String,
+        invoiceNum: String,
+        responsible: String,
+        meatType: com.example.data.MeatType,
+        cutName: String = "",
+        zone: TemperatureZone,
+        tempCelsius: Double,
+        quantity: Double,
+        unit: com.example.data.MeasurementUnit,
+        batch: String,
+        expiryEpochDay: Long
+    ) {
+        val resolvedCut = cutName.trim().ifBlank { meatType.displayName }
+        _formState.update { current ->
+            val newItem = ParsedInvoiceItemDraft(
+                rawDescription = resolvedCut,
+                meatType = meatType,
+                cutName = resolvedCut,
+                temperatureZone = zone,
+                measuredTempCelsius = tempCelsius,
+                chamberName = zone.defaultChamber,
+                quantity = quantity,
+                unit = unit,
+                batchCode = batch,
+                expiryEpochDay = expiryEpochDay
+            )
+            current.copy(
+                supplierName = supplier.ifBlank { current.supplierName },
+                invoiceNumber = invoiceNum.ifBlank { current.invoiceNumber },
+                responsibleName = responsible.ifBlank { current.responsibleName },
+                targetZone = zone,
+                measuredTempText = String.format(Locale.US, "%.1f", tempCelsius),
+                items = current.items + newItem
+            )
+        }
+    }
+
     private fun formatTempForInput(temp: Double): String {
         return String.format(Locale.US, "%.1f", temp)
     }

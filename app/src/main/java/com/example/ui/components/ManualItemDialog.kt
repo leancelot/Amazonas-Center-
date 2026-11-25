@@ -194,23 +194,28 @@ fun ManualItemSheet(
                 }
             }
 
-            Text("Zona Térmica & Temperatura", style = MaterialTheme.typography.titleSmall)
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+            Text("Armazenamento (Câmara) & Temperatura", style = MaterialTheme.typography.titleSmall)
+            val zoneOptions = if (zone == TemperatureZone.MATURACAO) {
+                TemperatureZone.entries
+            } else {
+                TemperatureZone.primaryZones
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                TemperatureZone.entries.forEach { z ->
+                zoneOptions.forEach { z ->
                     FilterChip(
                         selected = zone == z,
                         onClick = {
                             zone = z
+                            chamberName = z.defaultChamber
                             val nextTemp = if (initialItem == null && z == defaultZone && sessionTempCelsius != null) {
                                 sessionTempCelsius
                             } else {
                                 z.defaultTempCelsius
                             }
                             tempText = String.format(Locale.US, "%.1f", nextTemp)
-                            chamberName = z.defaultChamber
                             if (initialItem == null) {
                                 val days = if (z == TemperatureZone.CONGELADO) {
                                     meatType.defaultFrozenDays
@@ -221,68 +226,31 @@ fun ManualItemSheet(
                             }
                         },
                         label = { Text("${z.displayName} (${z.rangeLabel})") },
-                        modifier = Modifier.testTag("manual_zone_chip_${z.name.lowercase()}")
-                    )
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                OutlinedTextField(
-                    value = tempText,
-                    onValueChange = { tempText = ReceivingViewModel.sanitizeTemperatureInput(it) },
-                    label = { Text("Temp. (°C)") },
-                    trailingIcon = {
-                        TextButton(
-                            onClick = { tempText = ReceivingViewModel.toggleTemperatureSign(tempText) },
-                            modifier = Modifier.testTag("manual_temp_sign_button")
-                        ) {
-                            Text("±", fontWeight = FontWeight.Bold)
-                        }
-                    },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
-                    singleLine = true,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("manual_temp_input")
-                )
-            }
-
-            Text("Categoria de Armazenamento", style = MaterialTheme.typography.titleSmall)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                TemperatureZone.entries.forEach { z ->
-                    FilterChip(
-                        selected = chamberName.equals(z.displayName, ignoreCase = true) || zone == z,
-                        onClick = {
-                            zone = z
-                            chamberName = z.displayName
-                            val nextTemp = if (initialItem == null && z == defaultZone && sessionTempCelsius != null) {
-                                sessionTempCelsius
-                            } else {
-                                z.defaultTempCelsius
-                            }
-                            tempText = String.format(Locale.US, "%.1f", nextTemp)
-                            if (initialItem == null) {
-                                val days = if (z == TemperatureZone.CONGELADO) {
-                                    meatType.defaultFrozenDays
-                                } else {
-                                    meatType.defaultChilledDays
-                                }
-                                expiryEpochDay = DateUtils.addDaysToTodayEpochDay(days)
-                            }
-                        },
-                        label = { Text(z.displayName) },
                         modifier = Modifier
                             .weight(1f)
-                            .testTag("manual_category_${z.name.lowercase()}")
+                            .testTag("manual_zone_chip_${z.name.lowercase()}")
                     )
                 }
             }
+
+            OutlinedTextField(
+                value = tempText,
+                onValueChange = { tempText = ReceivingViewModel.sanitizeTemperatureInput(it) },
+                label = { Text("Temp. (°C)") },
+                trailingIcon = {
+                    TextButton(
+                        onClick = { tempText = ReceivingViewModel.toggleTemperatureSign(tempText) },
+                        modifier = Modifier.testTag("manual_temp_sign_button")
+                    ) {
+                        Text("±", fontWeight = FontWeight.Bold)
+                    }
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("manual_temp_input")
+            )
 
             tempText.replace(',', '.').toDoubleOrNull()?.let { parsedTemp ->
                 ThermalComplianceBadge(

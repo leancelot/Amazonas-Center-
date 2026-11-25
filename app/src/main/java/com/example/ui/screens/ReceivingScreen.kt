@@ -30,6 +30,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
@@ -45,9 +46,12 @@ import androidx.compose.material.icons.rounded.PictureAsPdf
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -63,9 +67,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -118,6 +124,34 @@ fun ReceivingScreen(
     var showManualItemSheet by remember { mutableStateOf(false) }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
     var pendingDeleteSession by remember { mutableStateOf<ReceivingSessionSummary?>(null) }
+
+    var quickStep by remember { mutableIntStateOf(0) } // 0 = Entrada na Portaria, 1 = Lançamento da Nota
+    var qSupplier by remember { mutableStateOf("") }
+    var qInvoice by remember { mutableStateOf("") }
+    var qResponsible by remember { mutableStateOf("") }
+    var qMeatType by remember { mutableStateOf(com.example.data.MeatType.BOVINA) }
+    var qCutName by remember { mutableStateOf("") }
+    var qZone by remember { mutableStateOf(TemperatureZone.RESFRIADO) }
+    var qTempText by remember { mutableStateOf("2.0") }
+    var qQtyText by remember { mutableStateOf("") }
+    var qUnit by remember { mutableStateOf(com.example.data.MeasurementUnit.KG) }
+    var qBatch by remember { mutableStateOf("") }
+    var qExpiryEpochDay by remember { mutableLongStateOf(DateUtils.addDaysToTodayEpochDay(7)) }
+    var qShowDateDialog by remember { mutableStateOf(false) }
+    var qErrorMsg by remember { mutableStateOf<String?>(null) }
+
+    androidx.compose.runtime.LaunchedEffect(extractionState) {
+        val success = extractionState as? ExtractionUiState.Success
+        if (success != null && success.message.startsWith("Recebimento salvo!")) {
+            qInvoice = ""
+            qResponsible = ""
+            qSupplier = ""
+            qCutName = ""
+            qQtyText = ""
+            qBatch = ""
+            qErrorMsg = null
+        }
+    }
 
     val galleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -216,71 +250,471 @@ fun ReceivingScreen(
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     item {
-                        ExtractionBanner(
-                            state = extractionState,
-                            onRetryCloud = { viewModel.retryLastMediaWithCloudReserve(context) },
-                            onDismiss = viewModel::clearExtractionBanner
-                        )
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            shape = MaterialTheme.shapes.medium,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Button(
+                                    onClick = { quickStep = 0 },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (quickStep == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+                                        contentColor = if (quickStep == 0) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("tab_quick_entry")
+                                ) {
+                                    Text("1. Entrada de Nota", fontWeight = FontWeight.SemiBold)
+                                }
+                                Button(
+                                    onClick = { quickStep = 1 },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (quickStep == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+                                        contentColor = if (quickStep == 1) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("tab_invoice_launch")
+                                ) {
+                                    Text("2. Lançamento (${formState.items.size})", fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
                     }
 
-                    item {
-                        Text(
-                            text = "Leitura Automática de Nota Fiscal",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            InvoiceActionTile(
-                                icon = Icons.Rounded.CameraAlt,
-                                title = "Foto (IA Local)",
-                                subtitle = "Offline • OCR",
-                                onClick = {
-                                    useCloudReserveForNextPhoto = false
-                                    showPhotoSourceDialog = true
-                                },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("action_invoice_photo_ai")
-                            )
-                            InvoiceActionTile(
-                                icon = Icons.Rounded.PictureAsPdf,
-                                title = "PDF (IA Local)",
-                                subtitle = "Offline • OCR",
-                                onClick = { pdfLauncher.launch(arrayOf("application/pdf")) },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("action_invoice_pdf_ai")
+                    if (quickStep == 0) {
+                        item {
+                            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Text(
+                                        text = "Entrega na Portaria • Perguntas Rápidas",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = "Confira os dados essenciais para liberar o entregador. O restante da nota você completa depois no Lançamento.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Text("1. Qual o nº da nota e quem recebeu?", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        OutlinedTextField(
+                                            value = qInvoice,
+                                            onValueChange = { qInvoice = it; qErrorMsg = null },
+                                            label = { Text("Nº da NF *") },
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                            singleLine = true,
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("quick_nf_input")
+                                        )
+                                        OutlinedTextField(
+                                            value = qResponsible,
+                                            onValueChange = { qResponsible = it; qErrorMsg = null },
+                                            label = { Text("Responsável *") },
+                                            singleLine = true,
+                                            modifier = Modifier
+                                                .weight(1.2f)
+                                                .testTag("quick_responsible_input")
+                                        )
+                                    }
+
+                                    OutlinedTextField(
+                                        value = qSupplier,
+                                        onValueChange = { qSupplier = it; qErrorMsg = null },
+                                        label = { Text("Frigorífico / Fornecedor (opcional agora)") },
+                                        singleLine = true,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("quick_supplier_input")
+                                    )
+
+                                    val recentSuppliers = remember(pastSessions) {
+                                        pastSessions.map { it.supplierName }
+                                            .filter { it.isNotBlank() && it != "Fornecedor não informado" }
+                                            .distinct()
+                                            .take(4)
+                                    }
+                                    if (recentSuppliers.isNotEmpty() && qSupplier.isBlank()) {
+                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            recentSuppliers.forEach { sup ->
+                                                FilterChip(
+                                                    selected = false,
+                                                    onClick = { qSupplier = sup },
+                                                    label = { Text(sup) }
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Text("2. Qual tipo de carne está chegando?", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        com.example.data.MeatType.entries.forEach { type ->
+                                            FilterChip(
+                                                selected = qMeatType == type,
+                                                onClick = {
+                                                    qMeatType = type
+                                                    val days = if (qZone == TemperatureZone.CONGELADO) type.defaultFrozenDays else type.defaultChilledDays
+                                                    qExpiryEpochDay = DateUtils.addDaysToTodayEpochDay(days)
+                                                },
+                                                label = { Text(type.displayName) },
+                                                modifier = Modifier.testTag("quick_meat_${type.name.lowercase()}")
+                                            )
+                                        }
+                                    }
+
+                                    OutlinedTextField(
+                                        value = qCutName,
+                                        onValueChange = { qCutName = it },
+                                        label = { Text("Corte específico (opcional, digite p/ sugestão)") },
+                                        placeholder = { Text("Ex.: Picanha, Alcatra, Peito...") },
+                                        singleLine = true,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("quick_cut_input")
+                                    )
+
+                                    val quickCutMatches = remember(qCutName, qMeatType) {
+                                        if (qCutName.isNotBlank()) {
+                                            qMeatType.presetCuts
+                                                .filter { it.contains(qCutName, ignoreCase = true) && !it.equals(qCutName, ignoreCase = true) }
+                                                .take(4)
+                                        } else {
+                                            emptyList()
+                                        }
+                                    }
+                                    if (quickCutMatches.isNotEmpty()) {
+                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            quickCutMatches.forEach { suggestion ->
+                                                FilterChip(
+                                                    selected = false,
+                                                    onClick = { qCutName = suggestion },
+                                                    label = { Text(suggestion) }
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Text("3. Produto resfriado ou congelado? Qual a temperatura?", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        TemperatureZone.primaryZones.forEach { z ->
+                                            FilterChip(
+                                                selected = qZone == z,
+                                                onClick = {
+                                                    qZone = z
+                                                    qTempText = String.format(Locale.US, "%.1f", z.defaultTempCelsius)
+                                                    val days = if (z == TemperatureZone.CONGELADO) qMeatType.defaultFrozenDays else qMeatType.defaultChilledDays
+                                                    qExpiryEpochDay = DateUtils.addDaysToTodayEpochDay(days)
+                                                },
+                                                label = { Text("${z.displayName} (${z.rangeLabel})") },
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("quick_zone_${z.name.lowercase()}")
+                                            )
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        OutlinedTextField(
+                                            value = qTempText,
+                                            onValueChange = { qTempText = ReceivingViewModel.sanitizeTemperatureInput(it) },
+                                            label = { Text("Temp. chegada (°C) *") },
+                                            trailingIcon = {
+                                                TextButton(onClick = { qTempText = ReceivingViewModel.toggleTemperatureSign(qTempText) }) {
+                                                    Text("±", fontWeight = FontWeight.Bold)
+                                                }
+                                            },
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                                            singleLine = true,
+                                            modifier = Modifier
+                                                .weight(1.1f)
+                                                .testTag("quick_temp_input")
+                                        )
+                                        qTempText.replace(',', '.').toDoubleOrNull()?.let { t ->
+                                            ThermalComplianceBadge(
+                                                compliance = ThermalCompliance.evaluate(qZone, t),
+                                                tempCelsius = t,
+                                                showTempValue = false
+                                            )
+                                        }
+                                    }
+
+                                    Text("4. Peso da balança, lote e validade", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        OutlinedTextField(
+                                            value = qQtyText,
+                                            onValueChange = { qQtyText = it; qErrorMsg = null },
+                                            label = { Text("Peso balança / Qtd *") },
+                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                            singleLine = true,
+                                            modifier = Modifier
+                                                .weight(1.2f)
+                                                .testTag("quick_qty_input")
+                                        )
+                                        FlowRow(
+                                            modifier = Modifier.weight(1.1f),
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            com.example.data.MeasurementUnit.entries.forEach { u ->
+                                                FilterChip(
+                                                    selected = qUnit == u,
+                                                    onClick = { qUnit = u },
+                                                    label = { Text(u.shortLabel) }
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        OutlinedTextField(
+                                            value = qBatch,
+                                            onValueChange = { qBatch = it },
+                                            label = { Text("Lote") },
+                                            singleLine = true,
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("quick_batch_input")
+                                        )
+                                        OutlinedButton(
+                                            onClick = { qShowDateDialog = true },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(52.dp)
+                                        ) {
+                                            Icon(Icons.Rounded.CalendarMonth, contentDescription = null)
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(DateUtils.formatEpochDay(qExpiryEpochDay))
+                                        }
+                                    }
+
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        listOf(5 to "+5d", 7 to "+7d", 15 to "+15d", 30 to "+30d", 90 to "+90d").forEach { (days, label) ->
+                                            FilterChip(
+                                                selected = DateUtils.daysUntil(qExpiryEpochDay) == days,
+                                                onClick = { qExpiryEpochDay = DateUtils.addDaysToTodayEpochDay(days) },
+                                                label = { Text(label) }
+                                            )
+                                        }
+                                    }
+
+                                    if (formState.items.isNotEmpty()) {
+                                        Text(
+                                            text = "Já conferidos nesta entrega: ${formState.items.size} lote(s)",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.secondary,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+
+                                    if (qErrorMsg != null) {
+                                        Text(qErrorMsg!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = {
+                                            val qty = qQtyText.replace(',', '.').toDoubleOrNull()
+                                            val temp = qTempText.replace(',', '.').toDoubleOrNull() ?: qZone.defaultTempCelsius
+                                            when {
+                                                qty == null || qty <= 0.0 -> qErrorMsg = "Informe o peso da balança ou quantidade para adicionar."
+                                                else -> {
+                                                    viewModel.addQuickEntryItem(
+                                                        supplier = qSupplier.trim(),
+                                                        invoiceNum = qInvoice.trim(),
+                                                        responsible = qResponsible.trim(),
+                                                        meatType = qMeatType,
+                                                        cutName = qCutName.trim(),
+                                                        zone = qZone,
+                                                        tempCelsius = temp,
+                                                        quantity = qty,
+                                                        unit = qUnit,
+                                                        batch = qBatch.trim(),
+                                                        expiryEpochDay = qExpiryEpochDay
+                                                    )
+                                                    qQtyText = ""
+                                                    qBatch = ""
+                                                    qCutName = ""
+                                                    Toast.makeText(context, "Corte adicionado! Informe o próximo da entrega.", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(48.dp)
+                                            .testTag("quick_add_another_button")
+                                    ) {
+                                        Icon(Icons.Rounded.Add, contentDescription = null)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Adicionar Outro Corte da Entrega")
+                                    }
+
+                                    Button(
+                                        onClick = {
+                                            val qty = qQtyText.replace(',', '.').toDoubleOrNull()
+                                            val temp = qTempText.replace(',', '.').toDoubleOrNull() ?: qZone.defaultTempCelsius
+                                            val hasExistingItems = formState.items.isNotEmpty()
+                                            when {
+                                                qInvoice.isBlank() && formState.invoiceNumber.isBlank() -> qErrorMsg = "Informe o número da nota (NF)."
+                                                qResponsible.isBlank() && formState.responsibleName.isBlank() -> qErrorMsg = "Informe o responsável pelo recebimento."
+                                                !hasExistingItems && (qty == null || qty <= 0.0) -> qErrorMsg = "Informe o peso da balança ou quantidade."
+                                                else -> {
+                                                    if (qty != null && qty > 0.0) {
+                                                        viewModel.addQuickEntryItem(
+                                                            supplier = qSupplier.trim(),
+                                                            invoiceNum = qInvoice.trim(),
+                                                            responsible = qResponsible.trim(),
+                                                            meatType = qMeatType,
+                                                            cutName = qCutName.trim(),
+                                                            zone = qZone,
+                                                            tempCelsius = temp,
+                                                            quantity = qty,
+                                                            unit = qUnit,
+                                                            batch = qBatch.trim(),
+                                                            expiryEpochDay = qExpiryEpochDay
+                                                        )
+                                                        qQtyText = ""
+                                                        qBatch = ""
+                                                        qCutName = ""
+                                                    } else {
+                                                        if (qSupplier.isNotBlank()) viewModel.updateSupplierName(qSupplier.trim())
+                                                        if (qInvoice.isNotBlank()) viewModel.updateInvoiceNumber(qInvoice.trim())
+                                                        if (qResponsible.isNotBlank()) viewModel.updateResponsibleName(qResponsible.trim())
+                                                    }
+                                                    Toast.makeText(context, "Entregador liberado! Complete o lançamento da nota.", Toast.LENGTH_LONG).show()
+                                                    quickStep = 1
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(52.dp)
+                                            .testTag("quick_release_driver_button")
+                                    ) {
+                                        Icon(Icons.Rounded.CheckCircle, contentDescription = null)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Liberar Entregador & Ir p/ Lançamento")
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        if (formState.items.isNotEmpty()) {
+                            item {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    shape = MaterialTheme.shapes.medium,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "Entrada registrada (${formState.items.size} lote(s) • NF ${formState.invoiceNumber.ifBlank { "—" }}). Complete os dados abaixo ou anexe a nota.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.padding(12.dp)
+                                    )
+                                }
+                            }
+                        }
+                        item {
+                            ExtractionBanner(
+                                state = extractionState,
+                                onRetryCloud = { viewModel.retryLastMediaWithCloudReserve(context) },
+                                onDismiss = viewModel::clearExtractionBanner
                             )
                         }
-                        Spacer(Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            InvoiceActionTile(
-                                icon = Icons.Rounded.Code,
-                                title = "XML NF-e",
-                                subtitle = "Offline 100%",
-                                onClick = { xmlLauncher.launch(arrayOf("text/xml", "application/xml", "*/*")) },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("action_invoice_xml")
+
+                        item {
+                            Text(
+                                text = "Leitura Automática de Nota Fiscal",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
                             )
-                            InvoiceActionTile(
-                                icon = Icons.Rounded.QrCodeScanner,
-                                title = "QR / Código",
-                                subtitle = "Chave DANFE",
-                                onClick = onOpenBarcodeScanner,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("action_invoice_qr")
-                            )
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                InvoiceActionTile(
+                                    icon = Icons.Rounded.CameraAlt,
+                                    title = "Foto (IA Local)",
+                                    subtitle = "Offline • OCR",
+                                    onClick = {
+                                        useCloudReserveForNextPhoto = false
+                                        showPhotoSourceDialog = true
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("action_invoice_photo_ai")
+                                )
+                                InvoiceActionTile(
+                                    icon = Icons.Rounded.PictureAsPdf,
+                                    title = "PDF (IA Local)",
+                                    subtitle = "Offline • OCR",
+                                    onClick = { pdfLauncher.launch(arrayOf("application/pdf")) },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("action_invoice_pdf_ai")
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                InvoiceActionTile(
+                                    icon = Icons.Rounded.Code,
+                                    title = "XML NF-e",
+                                    subtitle = "Offline 100%",
+                                    onClick = { xmlLauncher.launch(arrayOf("text/xml", "application/xml", "*/*")) },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("action_invoice_xml")
+                                )
+                                InvoiceActionTile(
+                                    icon = Icons.Rounded.QrCodeScanner,
+                                    title = "QR / Código",
+                                    subtitle = "Chave DANFE",
+                                    onClick = onOpenBarcodeScanner,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("action_invoice_qr")
+                                )
+                            }
                         }
-                    }
 
                     item {
                         OutlinedCard(modifier = Modifier.fillMaxWidth()) {
@@ -331,14 +765,24 @@ fun ReceivingScreen(
                                     )
                                 }
 
-                                Text("Zona da Carga & Temperatura Aferida", style = MaterialTheme.typography.labelLarge)
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    TemperatureZone.entries.forEach { z ->
+                                Text("Categoria & Temperatura Aferida", style = MaterialTheme.typography.labelLarge)
+                                val sessionZones = if (formState.targetZone == TemperatureZone.MATURACAO) {
+                                    TemperatureZone.entries
+                                } else {
+                                    TemperatureZone.primaryZones
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    sessionZones.forEach { z ->
                                         FilterChip(
                                             selected = formState.targetZone == z,
                                             onClick = { viewModel.updateTargetZone(z) },
                                             label = { Text("${z.displayName} (${z.rangeLabel})") },
-                                            modifier = Modifier.testTag("session_zone_${z.name.lowercase()}")
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("session_zone_${z.name.lowercase()}")
                                         )
                                     }
                                 }
@@ -499,6 +943,7 @@ fun ReceivingScreen(
                                 }
                             }
                         }
+                    }
                     }
                 }
             } else {
@@ -697,6 +1142,34 @@ fun ReceivingScreen(
                 }
             }
         )
+    }
+
+    if (qShowDateDialog) {
+        val datePickerState = rememberDatePickerState(
+            initialSelectedDateMillis = DateUtils.epochDayToUtcPickerMillis(qExpiryEpochDay)
+        )
+        DatePickerDialog(
+            onDismissRequest = { qShowDateDialog = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        datePickerState.selectedDateMillis?.let { millis ->
+                            qExpiryEpochDay = DateUtils.millisToEpochDay(millis)
+                        }
+                        qShowDateDialog = false
+                    }
+                ) {
+                    Text("Confirmar")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { qShowDateDialog = false }) {
+                    Text("Cancelar")
+                }
+            }
+        ) {
+            DatePicker(state = datePickerState)
+        }
     }
 
     if (showManualItemSheet) {

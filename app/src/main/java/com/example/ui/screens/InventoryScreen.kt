@@ -444,9 +444,14 @@ private fun ItemDetailSheet(
                         modifier = Modifier.padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text("Transferir Câmara / Atualizar °C", style = MaterialTheme.typography.titleSmall)
+                        Text("Categoria da Câmara / Atualizar °C", style = MaterialTheme.typography.titleSmall)
+                        val transferZones = if (item.zoneEnum == TemperatureZone.MATURACAO) {
+                            TemperatureZone.entries
+                        } else {
+                            TemperatureZone.primaryZones
+                        }
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TemperatureZone.entries.forEach { z ->
+                            transferZones.forEach { z ->
                                 FilterChip(
                                     selected = newZone == z,
                                     onClick = {
@@ -458,13 +463,6 @@ private fun ItemDetailSheet(
                                 )
                             }
                         }
-                        OutlinedTextField(
-                            value = newChamber,
-                            onValueChange = { newChamber = it },
-                            label = { Text("Câmara de destino") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
                         OutlinedTextField(
                             value = newTempText,
                             onValueChange = { newTempText = ReceivingViewModel.sanitizeTemperatureInput(it) },

@@ -84,7 +84,7 @@ enum class TemperatureZone(
         minIdealCelsius = -1.5,
         maxIdealCelsius = 4.0,
         defaultTempCelsius = 2.0,
-        defaultChamber = "Câmara 01 — Resfriados"
+        defaultChamber = "Resfriado"
     ),
     CONGELADO(
         displayName = "Congelado",
@@ -92,7 +92,7 @@ enum class TemperatureZone(
         minIdealCelsius = -35.0,
         maxIdealCelsius = -18.0,
         defaultTempCelsius = -18.0,
-        defaultChamber = "Câmara 02 — Congelados"
+        defaultChamber = "Congelado"
     ),
     MATURACAO(
         displayName = "Maturação",
@@ -100,21 +100,22 @@ enum class TemperatureZone(
         minIdealCelsius = -0.5,
         maxIdealCelsius = 2.5,
         defaultTempCelsius = 1.0,
-        defaultChamber = "Câmara 03 — Maturação"
+        defaultChamber = "Maturação"
     );
 
     companion object {
+        val primaryZones: List<TemperatureZone> = listOf(RESFRIADO, CONGELADO)
+
         fun fromRaw(raw: String?): TemperatureZone {
             return entries.firstOrNull { it.name.equals(raw?.trim(), ignoreCase = true) }
                 ?: RESFRIADO
         }
 
         val defaultChambers: List<String> = listOf(
-            "Câmara 01 — Resfriados",
-            "Câmara 02 — Congelados",
-            "Câmara 03 — Maturação",
-            "Balcão Refrigerado",
-            "Ante-Câmara / Desossa"
+            "Resfriado",
+            "Congelado",
+            "Maturação",
+            "Balcão Refrigerado"
         )
     }
 }
