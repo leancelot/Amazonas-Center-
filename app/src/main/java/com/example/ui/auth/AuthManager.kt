@@ -138,42 +138,40 @@ fun onGoogleSignInClicked(
     scope.launch {
         try {
             val cred = credentialManager.getCredential(activityContext, request).credential
-            if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
-                if (token.isBlank()) {
-                    onAuthError("O Google não retornou um token de identificação válido.")
-                    return@launch
-                }
-                val result = Firebase.auth
-                    .signInWithCredential(GoogleAuthProvider.getCredential(token, null))
-                    .await()
-                if (result.user != null) {
-                    onAuthSuccess()
-                } else {
-                    onAuthError("Conta Google autenticada, mas o Firebase não criou a sessão do usuário.")
-                }
-            } else {
-                onAuthError("Tipo de credencial inesperado retornado pelo Google (${cred.type}).")
-            }
+            handleGoogleCredential(
+                cred = cred,
+                onAuthSuccess = onAuthSuccess,
+                onAuthError = onAuthError
+            )
         } catch (e: GetCredentialCancellationException) {
-            Log.w("Auth", "Google Sign-In cancelled or dismissed: ${e.errorMessage ?: e.message}", e)
-            val detail = (e.errorMessage?.toString() ?: e.message)?.takeIf { it.isNotBlank() }
-            val diagnostic = buildString {
-                append("Login com Google interrompido após selecionar a conta.")
-                if (detail != null) {
-                    append("\nMotivo: $detail")
-                }
-                append("\n\nSe você instalou um APK gerado fora do AI Studio (Release/GitHub) ou em aparelho físico, confira se o SHA-1 dessa assinatura está cadastrado no Firebase Console para o pacote com.aistudio.frigstock.krmvqt.")
+            val primaryDetail = (e.errorMessage?.toString() ?: e.message).orEmpty()
+            Log.w("Auth", "Google Sign-In cancelled or dismissed: $primaryDetail", e)
+            val isReauthOrAccountIssue = primaryDetail.contains("reauth", ignoreCase = true) ||
+                primaryDetail.contains("[16]") ||
+                primaryDetail.contains("16:")
+            if (isReauthOrAccountIssue) {
+                tryGoogleIdFallback(
+                    activityContext = activityContext,
+                    clientId = clientId,
+                    credentialManager = credentialManager,
+                    primaryDetail = primaryDetail,
+                    onAuthSuccess = onAuthSuccess,
+                    onAuthError = onAuthError,
+                    onAuthCancelled = onAuthCancelled
+                )
+            } else {
+                onAuthCancelled(formatCancellationDiagnostic(primaryDetail))
             }
-            onAuthCancelled(diagnostic)
         } catch (e: NoCredentialException) {
-            Log.w("Auth", "No Google credentials found: ${e.errorMessage ?: e.message}", e)
-            val detail = (e.errorMessage?.toString() ?: e.message)?.takeIf { it.isNotBlank() }
-            onAuthError(
-                buildString {
-                    append("Nenhuma conta Google disponível ou autorizada pelo Google Play Services neste aparelho.")
-                    if (detail != null) append("\nMotivo: $detail")
-                }
+            Log.w("Auth", "No Google credentials found with SignInWithGoogleOption: ${e.errorMessage ?: e.message}", e)
+            tryGoogleIdFallback(
+                activityContext = activityContext,
+                clientId = clientId,
+                credentialManager = credentialManager,
+                primaryDetail = (e.errorMessage?.toString() ?: e.message).orEmpty(),
+                onAuthSuccess = onAuthSuccess,
+                onAuthError = onAuthError,
+                onAuthCancelled = onAuthCancelled
             )
         } catch (e: GetCredentialException) {
             Log.e("Auth", "Google Sign-In CredentialException [${e.type}]: ${e.errorMessage ?: e.message}", e)
@@ -182,7 +180,7 @@ fun onGoogleSignInClicked(
                 buildString {
                     append("Erro do Google Sign-In (${e.type.substringAfterLast('.')}).")
                     if (detail != null) append("\nDetalhe: $detail")
-                    append("\n\nVerifique a conexão com a internet, o Google Play Services e se o SHA-1 do APK está registrado no Firebase.")
+                    append("\n\nVocê pode usar o modo local abaixo para testar agora ou tentar outra conta Google.")
                 }
             )
         } catch (e: FirebaseAuthException) {
@@ -193,6 +191,98 @@ fun onGoogleSignInClicked(
         } catch (e: Exception) {
             Log.e("Auth", "Google Sign-In failed", e)
             onAuthError("Falha ao entrar com Google (${e.javaClass.simpleName}): ${e.localizedMessage ?: e.message ?: "Erro desconhecido."}")
+        }
+    }
+}
+
+private suspend fun tryGoogleIdFallback(
+    activityContext: Activity,
+    clientId: String,
+    credentialManager: CredentialManager,
+    primaryDetail: String,
+    onAuthSuccess: () -> Unit,
+    onAuthError: (String) -> Unit,
+    onAuthCancelled: (String) -> Unit
+) {
+    val fallbackOption = GetGoogleIdOption.Builder()
+        .setFilterByAuthorizedAccounts(false)
+        .setServerClientId(clientId)
+        .setAutoSelectEnabled(false)
+        .build()
+    val fallbackRequest = GetCredentialRequest.Builder()
+        .addCredentialOption(fallbackOption)
+        .build()
+    try {
+        val cred = credentialManager.getCredential(activityContext, fallbackRequest).credential
+        handleGoogleCredential(
+            cred = cred,
+            onAuthSuccess = onAuthSuccess,
+            onAuthError = onAuthError
+        )
+    } catch (fallbackCancel: GetCredentialCancellationException) {
+        val fallbackDetail = (fallbackCancel.errorMessage?.toString() ?: fallbackCancel.message).orEmpty()
+        Log.w("Auth", "Fallback Google Sign-In cancelled: $fallbackDetail", fallbackCancel)
+        onAuthCancelled(formatCancellationDiagnostic(fallbackDetail.ifBlank { primaryDetail }))
+    } catch (fallbackNoCred: NoCredentialException) {
+        Log.w("Auth", "Fallback NoCredentialException: ${fallbackNoCred.errorMessage ?: fallbackNoCred.message}", fallbackNoCred)
+        onAuthCancelled(formatCancellationDiagnostic(primaryDetail.ifBlank { fallbackNoCred.message.orEmpty() }))
+    } catch (fallbackCred: GetCredentialException) {
+        Log.e("Auth", "Fallback CredentialException [${fallbackCred.type}]: ${fallbackCred.errorMessage ?: fallbackCred.message}", fallbackCred)
+        val detail = (fallbackCred.errorMessage?.toString() ?: fallbackCred.message).orEmpty().ifBlank { primaryDetail }
+        onAuthError(
+            buildString {
+                append("Erro do Google Sign-In (${fallbackCred.type.substringAfterLast('.')}).")
+                if (detail.isNotBlank()) append("\nDetalhe: $detail")
+                append("\n\nVocê pode testar o app imediatamente usando o modo local abaixo.")
+            }
+        )
+    } catch (e: FirebaseAuthException) {
+        Log.e("Auth", "Fallback FirebaseAuthException [${e.errorCode}]: ${e.message}", e)
+        onAuthError("Erro do Firebase Auth [${e.errorCode}]: ${e.localizedMessage ?: e.message ?: "Falha ao autenticar."}")
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.e("Auth", "Fallback Google Sign-In failed", e)
+        onAuthError("Falha ao entrar com Google (${e.javaClass.simpleName}): ${e.localizedMessage ?: e.message ?: "Erro desconhecido."}")
+    }
+}
+
+private suspend fun handleGoogleCredential(
+    cred: androidx.credentials.Credential,
+    onAuthSuccess: () -> Unit,
+    onAuthError: (String) -> Unit
+) {
+    if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
+        val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
+        if (token.isBlank()) {
+            onAuthError("O Google não retornou um token de identificação válido.")
+            return
+        }
+        val result = Firebase.auth
+            .signInWithCredential(GoogleAuthProvider.getCredential(token, null))
+            .await()
+        if (result.user != null) {
+            onAuthSuccess()
+        } else {
+            onAuthError("Conta Google autenticada, mas o Firebase não criou a sessão do usuário.")
+        }
+    } else {
+        onAuthError("Tipo de credencial inesperado retornado pelo Google (${cred.type}).")
+    }
+}
+
+private fun formatCancellationDiagnostic(detail: String): String {
+    val cleanDetail = detail.trim()
+    val isReauth16 = cleanDetail.contains("reauth", ignoreCase = true) || cleanDetail.contains("[16]")
+    return buildString {
+        append("Login com Google interrompido após selecionar a conta.")
+        if (cleanDetail.isNotBlank()) {
+            append("\nMotivo: $cleanDetail")
+        }
+        if (isReauth16) {
+            append("\n\nEsse erro [16] ocorre no Google Play Services do aparelho quando a conta Google exige revalidação ou o login OAuth é bloqueado no dispositivo. Enquanto isso, você pode tocar em \"Pular login (Testar em modo local)\" logo abaixo para usar o app normalmente no celular.")
+        } else {
+            append("\n\nVocê também pode tocar em \"Pular login (Testar em modo local)\" logo abaixo para testar todo o app neste aparelho.")
         }
     }
 }

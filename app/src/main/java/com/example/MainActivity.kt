@@ -36,6 +36,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,7 +55,9 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.ai.configureAppCheck
+import com.example.data.ColdStorageRepository
 import com.example.data.FirestoreColdStorageRepository
+import com.example.data.LocalColdStorageRepository
 import com.example.domain.invoice.InvoiceAiExtractor
 import com.example.domain.invoice.InvoiceLocalExtractor
 import com.example.ui.auth.authStateFlow
@@ -77,6 +80,7 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 
 sealed interface AppRoute {
@@ -156,39 +160,74 @@ class MainActivity : ComponentActivity() {
 private fun AppNavigation(auth: FirebaseAuth = Firebase.auth) {
     val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
     val user = currentUser
+    var isLocalModeEnabled by rememberSaveable { mutableStateOf(false) }
 
-    if (user == null) {
-        AuthScreen(onAuthSuccess = {})
-    } else {
-        key(user.uid) {
-            AuthenticatedFrigStockShell(
-                currentUserId = user.uid,
-                userEmail = user.email.orEmpty(),
-                userDisplayName = user.displayName.orEmpty()
+    LaunchedEffect(user?.uid) {
+        if (user != null) {
+            isLocalModeEnabled = false
+        }
+    }
+
+    when {
+        user != null -> {
+            key("cloud_${user.uid}") {
+                FrigStockShell(
+                    sessionKey = "cloud_${user.uid}",
+                    isLocalMode = false,
+                    currentUserId = user.uid,
+                    userEmail = user.email.orEmpty(),
+                    userDisplayName = user.displayName.orEmpty(),
+                    onSwitchToCloudSignIn = {}
+                )
+            }
+        }
+        isLocalModeEnabled -> {
+            key("local_test") {
+                FrigStockShell(
+                    sessionKey = "local_test",
+                    isLocalMode = true,
+                    currentUserId = "local_tester",
+                    userEmail = "teste.local@aparelho",
+                    userDisplayName = "Teste Local",
+                    onSwitchToCloudSignIn = { isLocalModeEnabled = false }
+                )
+            }
+        }
+        else -> {
+            AuthScreen(
+                onAuthSuccess = { isLocalModeEnabled = false },
+                onContinueLocalMode = { isLocalModeEnabled = true }
             )
         }
     }
 }
 
 @Composable
-private fun AuthenticatedFrigStockShell(
+private fun FrigStockShell(
+    sessionKey: String,
+    isLocalMode: Boolean,
     currentUserId: String,
     userEmail: String,
-    userDisplayName: String
+    userDisplayName: String,
+    onSwitchToCloudSignIn: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
 
-    val repository = remember(currentUserId) {
-        val databaseId = context.applicationContext.getString(R.string.firestore_database_id)
-        val db = FirebaseFirestore.getInstance(databaseId)
-        FirestoreColdStorageRepository(
-            db = db,
-            currentUserId = currentUserId,
-            currentUserEmail = userEmail,
-            currentUserDisplayName = userDisplayName
-        )
+    val repository: ColdStorageRepository = remember(sessionKey) {
+        if (isLocalMode) {
+            LocalColdStorageRepository(context.applicationContext)
+        } else {
+            val databaseId = context.applicationContext.getString(R.string.firestore_database_id)
+            val db = FirebaseFirestore.getInstance(databaseId)
+            FirestoreColdStorageRepository(
+                db = db,
+                currentUserId = currentUserId,
+                currentUserEmail = userEmail,
+                currentUserDisplayName = userDisplayName
+            )
+        }
     }
 
     val factory = remember(repository) {
@@ -199,7 +238,7 @@ private fun AuthenticatedFrigStockShell(
         )
     }
 
-    LaunchedEffect(currentUserId) {
+    LaunchedEffect(sessionKey) {
         repository.ensureSessionReady()
     }
 
@@ -208,11 +247,11 @@ private fun AuthenticatedFrigStockShell(
     val currentDestination = backStackEntry?.destination
     val showNavigationChrome = currentDestination?.hasRoute<AppRoute.BarcodeScanner>() != true
 
-    val dashboardViewModel: DashboardViewModel = viewModel(key = "dash_$currentUserId", factory = factory)
-    val receivingViewModel: ReceivingViewModel = viewModel(key = "recv_$currentUserId", factory = factory)
-    val inventoryViewModel: InventoryViewModel = viewModel(key = "inv_$currentUserId", factory = factory)
-    val reportsViewModel: ReportsViewModel = viewModel(key = "rep_$currentUserId", factory = factory)
-    val teamViewModel: TeamViewModel = viewModel(key = "team_$currentUserId", factory = factory)
+    val dashboardViewModel: DashboardViewModel = viewModel(key = "dash_$sessionKey", factory = factory)
+    val receivingViewModel: ReceivingViewModel = viewModel(key = "recv_$sessionKey", factory = factory)
+    val inventoryViewModel: InventoryViewModel = viewModel(key = "inv_$sessionKey", factory = factory)
+    val reportsViewModel: ReportsViewModel = viewModel(key = "rep_$sessionKey", factory = factory)
+    val teamViewModel: TeamViewModel = viewModel(key = "team_$sessionKey", factory = factory)
 
     var showTeamSheet by remember { mutableStateOf(false) }
 
@@ -301,7 +340,9 @@ private fun AuthenticatedFrigStockShell(
                                     inventoryViewModel.setUrgencyFilter(urgencyFilter)
                                     navigateTopLevel(AppRoute.Inventory)
                                 },
-                                onOpenTeamAccess = { showTeamSheet = true }
+                                onOpenTeamAccess = { showTeamSheet = true },
+                                isLocalMode = isLocalMode,
+                                onSwitchToCloudSignIn = onSwitchToCloudSignIn
                             )
                         }
                         composable<AppRoute.Receiving> {
@@ -340,6 +381,21 @@ private fun AuthenticatedFrigStockShell(
             onSignOutClick = {
                 showTeamSheet = false
                 signOutUser(credentialManager, scope)
+            },
+            isLocalMode = isLocalMode,
+            onSwitchToCloudSignIn = {
+                showTeamSheet = false
+                onSwitchToCloudSignIn()
+            },
+            onClearLocalData = if (repository is LocalColdStorageRepository) {
+                {
+                    scope.launch {
+                        repository.clearAllLocalData()
+                        showTeamSheet = false
+                    }
+                }
+            } else {
+                null
             }
         )
     }

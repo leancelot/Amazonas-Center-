@@ -26,12 +26,14 @@ import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -64,6 +66,7 @@ import com.example.ui.theme.JetBrainsMonoFamily
 @Composable
 fun AuthScreen(
     onAuthSuccess: () -> Unit,
+    onContinueLocalMode: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -290,6 +293,33 @@ fun AuthScreen(
                         )
                     }
                 }
+
+                OutlinedButton(
+                    onClick = onContinueLocalMode,
+                    enabled = !isSigningIn && !isAutoChecking,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .testTag("local_test_mode_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PhoneAndroid,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = "Pular login (Testar em modo local)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Text(
+                    text = "No modo local, seus recebimentos e estoque ficam salvos apenas neste aparelho para testes. Entre com Google quando quiser sincronizar na nuvem.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }

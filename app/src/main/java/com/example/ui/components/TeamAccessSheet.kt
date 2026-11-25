@@ -15,9 +15,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Login
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Button
@@ -58,7 +60,10 @@ fun TeamAccessSheet(
     userEmail: String,
     userDisplayName: String,
     onDismiss: () -> Unit,
-    onSignOutClick: () -> Unit
+    onSignOutClick: () -> Unit,
+    isLocalMode: Boolean = false,
+    onSwitchToCloudSignIn: () -> Unit = {},
+    onClearLocalData: (() -> Unit)? = null
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -98,7 +103,11 @@ fun TeamAccessSheet(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Conta conectada e permissões",
+                        text = if (isLocalMode) {
+                            "Modo local neste aparelho (sem sincronização na nuvem)"
+                        } else {
+                            "Conta conectada e permissões"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -180,38 +189,107 @@ fun TeamAccessSheet(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        OutlinedButton(
-                            onClick = viewModel::retrySession,
-                            enabled = !state.isSubmitting,
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(48.dp)
-                        ) {
-                            Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Sincronizar")
-                        }
-                        OutlinedButton(
-                            onClick = onSignOutClick,
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(48.dp)
-                                .testTag("sign_out_button")
-                        ) {
-                            Icon(
-                                Icons.AutoMirrored.Rounded.Logout,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("Sair", color = MaterialTheme.colorScheme.error)
+                        if (isLocalMode) {
+                            Button(
+                                onClick = onSwitchToCloudSignIn,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("connect_google_sheet_button")
+                            ) {
+                                Icon(Icons.AutoMirrored.Rounded.Login, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Entrar com Google")
+                            }
+                            if (onClearLocalData != null) {
+                                OutlinedButton(
+                                    onClick = onClearLocalData,
+                                    modifier = Modifier
+                                        .height(48.dp)
+                                        .testTag("clear_local_data_button")
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.DeleteOutline,
+                                        contentDescription = "Limpar dados locais",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Limpar", color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = viewModel::retrySession,
+                                enabled = !state.isSubmitting,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                            ) {
+                                Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Sincronizar")
+                            }
+                            OutlinedButton(
+                                onClick = onSignOutClick,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("sign_out_button")
+                            ) {
+                                Icon(
+                                    Icons.AutoMirrored.Rounded.Logout,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text("Sair", color = MaterialTheme.colorScheme.error)
+                            }
                         }
                     }
                 }
             }
 
-            if (activeRole.canManageTeam) {
+            if (isLocalMode) {
+                HorizontalDivider()
+                Text(
+                    text = "Simular Cargo no Modo Local",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "Teste as permissões de cada função antes de conectar a equipe na nuvem:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            StaffRole.entries.forEach { role ->
+                                FilterChip(
+                                    selected = activeRole == role,
+                                    onClick = {
+                                        viewModel.updateMemberRole(
+                                            memberUid = session.currentMember?.userId ?: "local_tester",
+                                            newRole = role,
+                                            active = true
+                                        )
+                                    },
+                                    label = { Text(role.displayName) },
+                                    modifier = Modifier.testTag("local_role_${role.name.lowercase()}")
+                                )
+                            }
+                        }
+                    }
+                }
+            } else if (activeRole.canManageTeam) {
                 HorizontalDivider()
 
                 Text(
