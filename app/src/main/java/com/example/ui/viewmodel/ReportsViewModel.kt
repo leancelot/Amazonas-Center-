@@ -2,6 +2,7 @@ package com.example.ui.viewmodel
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -16,6 +17,7 @@ import com.example.data.TemperatureZone
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import java.io.File
@@ -85,7 +87,8 @@ data class ReportsUiState(
     val zoneBreakdown: List<ZoneStockBreakdown> = emptyList(),
     val lossReasons: List<LossReasonBreakdown> = emptyList(),
     val recentMovements: List<StockMovementEntity> = emptyList(),
-    val activeItemsSnapshot: List<ColdStorageItemEntity> = emptyList()
+    val activeItemsSnapshot: List<ColdStorageItemEntity> = emptyList(),
+    val streamError: String? = null
 )
 
 class ReportsViewModel(
@@ -204,6 +207,14 @@ class ReportsViewModel(
             lossReasons = lossByReason,
             recentMovements = periodMovements.take(30),
             activeItemsSnapshot = activeItems
+        )
+    }.catch { error ->
+        val rootError = unwrapFirestoreStreamError(error)
+        Log.w("ReportsVM", "Error observing reports", rootError)
+        emit(
+            ReportsUiState(
+                streamError = friendlyFirestoreMessage(rootError, "Falha ao carregar relatórios.")
+            )
         )
     }.stateIn(
         scope = viewModelScope,

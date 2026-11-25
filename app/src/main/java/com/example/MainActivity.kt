@@ -31,14 +31,22 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.credentials.CredentialManager
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -47,10 +55,13 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.ai.configureAppCheck
-import com.example.data.AppDatabase
-import com.example.data.ColdStorageRepository
+import com.example.data.FirestoreColdStorageRepository
 import com.example.domain.invoice.InvoiceAiExtractor
 import com.example.domain.invoice.InvoiceLocalExtractor
+import com.example.ui.auth.authStateFlow
+import com.example.ui.auth.signOutUser
+import com.example.ui.components.TeamAccessSheet
+import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.BarcodeScannerScreen
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.InventoryScreen
@@ -62,6 +73,11 @@ import com.example.ui.viewmodel.FrigStockViewModelFactory
 import com.example.ui.viewmodel.InventoryViewModel
 import com.example.ui.viewmodel.ReceivingViewModel
 import com.example.ui.viewmodel.ReportsViewModel
+import com.example.ui.viewmodel.TeamViewModel
+import com.google.firebase.Firebase
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.auth
+import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.serialization.Serializable
 
 sealed interface AppRoute {
@@ -129,16 +145,10 @@ class MainActivity : ComponentActivity() {
 
         enableEdgeToEdge()
 
-        val database = AppDatabase.getInstance(applicationContext)
-        val repository = ColdStorageRepository(database.coldStorageDao())
-        val localExtractor = InvoiceLocalExtractor()
-        val aiExtractor = InvoiceAiExtractor()
-        val viewModelFactory = FrigStockViewModelFactory(repository, localExtractor, aiExtractor)
-
         setContent {
             FrigStockTheme {
                 SelectionContainer {
-                    FrigStockAppShell(factory = viewModelFactory)
+                    AppNavigation()
                 }
             }
         }
@@ -146,16 +156,68 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun FrigStockAppShell(factory: FrigStockViewModelFactory) {
+private fun AppNavigation(auth: FirebaseAuth = Firebase.auth) {
+    val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
+    val user = currentUser
+
+    if (user == null) {
+        AuthScreen(onAuthSuccess = {})
+    } else {
+        key(user.uid) {
+            AuthenticatedFrigStockShell(
+                currentUserId = user.uid,
+                userEmail = user.email.orEmpty(),
+                userDisplayName = user.displayName.orEmpty()
+            )
+        }
+    }
+}
+
+@Composable
+private fun AuthenticatedFrigStockShell(
+    currentUserId: String,
+    userEmail: String,
+    userDisplayName: String
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val credentialManager = remember(context) { CredentialManager.create(context) }
+
+    val repository = remember(currentUserId) {
+        val databaseId = context.applicationContext.getString(R.string.firestore_database_id)
+        val db = FirebaseFirestore.getInstance(databaseId)
+        FirestoreColdStorageRepository(
+            db = db,
+            currentUserId = currentUserId,
+            currentUserEmail = userEmail,
+            currentUserDisplayName = userDisplayName
+        )
+    }
+
+    val factory = remember(repository) {
+        FrigStockViewModelFactory(
+            repository = repository,
+            localExtractor = InvoiceLocalExtractor(),
+            aiExtractor = InvoiceAiExtractor()
+        )
+    }
+
+    LaunchedEffect(currentUserId) {
+        repository.ensureSessionReady()
+    }
+
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
     val showNavigationChrome = currentDestination?.hasRoute<AppRoute.BarcodeScanner>() != true
 
-    val dashboardViewModel: DashboardViewModel = viewModel(factory = factory)
-    val receivingViewModel: ReceivingViewModel = viewModel(factory = factory)
-    val inventoryViewModel: InventoryViewModel = viewModel(factory = factory)
-    val reportsViewModel: ReportsViewModel = viewModel(factory = factory)
+    val dashboardViewModel: DashboardViewModel = viewModel(key = "dash_$currentUserId", factory = factory)
+    val receivingViewModel: ReceivingViewModel = viewModel(key = "recv_$currentUserId", factory = factory)
+    val inventoryViewModel: InventoryViewModel = viewModel(key = "inv_$currentUserId", factory = factory)
+    val reportsViewModel: ReportsViewModel = viewModel(key = "rep_$currentUserId", factory = factory)
+    val teamViewModel: TeamViewModel = viewModel(key = "team_$currentUserId", factory = factory)
+
+    var showTeamSheet by remember { mutableStateOf(false) }
 
     val navigateTopLevel = remember(navController) {
         { route: AppRoute ->
@@ -241,7 +303,8 @@ private fun FrigStockAppShell(factory: FrigStockViewModelFactory) {
                                 onNavigateToInventory = { urgencyFilter ->
                                     inventoryViewModel.setUrgencyFilter(urgencyFilter)
                                     navigateTopLevel(AppRoute.Inventory)
-                                }
+                                },
+                                onOpenTeamAccess = { showTeamSheet = true }
                             )
                         }
                         composable<AppRoute.Receiving> {
@@ -269,5 +332,18 @@ private fun FrigStockAppShell(factory: FrigStockViewModelFactory) {
                 }
             }
         }
+    }
+
+    if (showTeamSheet) {
+        TeamAccessSheet(
+            viewModel = teamViewModel,
+            userEmail = userEmail,
+            userDisplayName = userDisplayName,
+            onDismiss = { showTeamSheet = false },
+            onSignOutClick = {
+                showTeamSheet = false
+                signOutUser(credentialManager, scope)
+            }
+        )
     }
 }

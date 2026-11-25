@@ -1,0 +1,473 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isValidStringList(list, minSize, maxSize) {
+      return list is list &&
+             list.size() >= minSize &&
+             list.size() <= maxSize &&
+             (list.size() == 0 || list[0] is string);
+    }
+
+    function isBootstrappedOwner() {
+      return isSignedIn() &&
+             request.auth.token.email_verified == true &&
+             request.auth.token.email == 'souoleandro@outlook.com';
+    }
+
+    function memberPath(shopId, uid) {
+      return /databases/$(database)/documents/shops/$(shopId)/members/$(uid);
+    }
+
+    function isActiveMember(shopId) {
+      return isSignedIn() &&
+             exists(memberPath(shopId, request.auth.uid)) &&
+             get(memberPath(shopId, request.auth.uid)).data.active == true;
+    }
+
+    function memberRole(shopId) {
+      return get(memberPath(shopId, request.auth.uid)).data.role;
+    }
+
+    function isShopManager(shopId) {
+      return isActiveMember(shopId) && memberRole(shopId) == 'GERENTE';
+    }
+
+    function canReceive(shopId) {
+      return isActiveMember(shopId) &&
+             memberRole(shopId) in ['GERENTE', 'CONFERENTE', 'CAMARA_FRIA', 'OPERADOR'];
+    }
+
+    function canEditReceivingOrStock(shopId) {
+      return isActiveMember(shopId) &&
+             memberRole(shopId) in ['GERENTE', 'CONFERENTE', 'CAMARA_FRIA'];
+    }
+
+    function canDeleteRecords(shopId) {
+      return isActiveMember(shopId) && memberRole(shopId) == 'GERENTE';
+    }
+
+    // --- Validation Blueprints ---
+    function isValidUserProfile(data) {
+      return isValidId(data.userId) &&
+             data.email is string && data.email.size() <= 200 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+             isValidId(data.activeShopId);
+    }
+
+    function isValidShop(data) {
+      return data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+             isValidId(data.ownerId) &&
+             isValidStringList(data.memberUids, 1, 30);
+    }
+
+    function isValidMember(data) {
+      return isValidId(data.userId) &&
+             isValidId(data.shopId) &&
+             isValidId(data.shopOwnerId) &&
+             isValidStringList(data.managerUids, 1, 10) &&
+             data.email is string && data.email.size() <= 200 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+             data.role in ['GERENTE', 'CONFERENTE', 'CAMARA_FRIA', 'OPERADOR'] &&
+             data.active is bool &&
+             (!('inviteId' in data) || isValidId(data.inviteId));
+    }
+
+    function isValidInvite(data) {
+      return isValidId(data.shopId) &&
+             data.shopName is string && data.shopName.size() >= 1 && data.shopName.size() <= 100 &&
+             data.emailLower is string && data.emailLower.size() >= 3 && data.emailLower.size() <= 200 &&
+             data.assignedRole in ['GERENTE', 'CONFERENTE', 'CAMARA_FRIA', 'OPERADOR'] &&
+             isValidId(data.invitedByUid) &&
+             data.status in ['PENDING', 'ACCEPTED', 'REVOKED'];
+    }
+
+    function isValidSession(data) {
+      return isValidId(data.shopId) &&
+             isValidStringList(data.memberUids, 1, 30) &&
+             isValidId(data.createdByUid) &&
+             data.invoiceNumber is string && data.invoiceNumber.size() <= 60 &&
+             data.accessKey is string && data.accessKey.size() <= 60 &&
+             data.supplierName is string && data.supplierName.size() >= 1 && data.supplierName.size() <= 140 &&
+             data.supplierCnpj is string && data.supplierCnpj.size() <= 30 &&
+             data.receivedAtMillis is int && data.receivedAtMillis > 0 &&
+             data.measuredTempCelsius is number && data.measuredTempCelsius >= -50 && data.measuredTempCelsius <= 50 &&
+             data.targetZone in ['RESFRIADO', 'CONGELADO', 'MATURACAO'] &&
+             data.thermalStatus in ['CONFORME', 'ATENCAO', 'CRITICO'] &&
+             data.responsibleName is string && data.responsibleName.size() <= 100 &&
+             data.sourceType in ['MANUAL', 'XML_NFE', 'OCR_FOTO', 'OCR_PDF', 'IA_FOTO', 'IA_PDF', 'QR_DANFE'] &&
+             data.notes is string && data.notes.size() <= 500 &&
+             data.itemCount is int && data.itemCount >= 0 &&
+             data.totalKg is number && data.totalKg >= 0;
+    }
+
+    function isValidColdStorageItem(data) {
+      return isValidId(data.shopId) &&
+             isValidStringList(data.memberUids, 1, 30) &&
+             isValidId(data.createdByUid) &&
+             data.sessionId is string && data.sessionId.size() <= 128 &&
+             data.meatType in ['BOVINA', 'SUINA', 'AVES', 'OVINA', 'PEIXES', 'EMBUTIDOS_OUTROS'] &&
+             data.cutName is string && data.cutName.size() >= 1 && data.cutName.size() <= 120 &&
+             data.temperatureZone in ['RESFRIADO', 'CONGELADO', 'MATURACAO'] &&
+             data.measuredTempCelsius is number && data.measuredTempCelsius >= -50 && data.measuredTempCelsius <= 50 &&
+             data.chamberName is string && data.chamberName.size() >= 1 && data.chamberName.size() <= 80 &&
+             data.batchCode is string && data.batchCode.size() <= 60 &&
+             data.sifCode is string && data.sifCode.size() <= 40 &&
+             data.initialQuantity is number && data.initialQuantity > 0 &&
+             data.currentQuantity is number && data.currentQuantity >= 0 &&
+             data.unit in ['KG', 'PECA', 'CAIXA'] &&
+             data.unitCostBrl is number && data.unitCostBrl >= 0 &&
+             data.expiryDateEpochDay is int &&
+             data.receivedAtMillis is int && data.receivedAtMillis > 0 &&
+             data.supplierName is string && data.supplierName.size() <= 140 &&
+             data.invoiceNumber is string && data.invoiceNumber.size() <= 60 &&
+             data.notes is string && data.notes.size() <= 500;
+    }
+
+    function isValidStockMovement(data) {
+      return isValidId(data.shopId) &&
+             isValidStringList(data.memberUids, 1, 30) &&
+             isValidId(data.createdByUid) &&
+             data.createdByName is string && data.createdByName.size() <= 100 &&
+             isValidId(data.itemId) &&
+             data.cutNameSnapshot is string && data.cutNameSnapshot.size() >= 1 && data.cutNameSnapshot.size() <= 120 &&
+             data.meatTypeSnapshot in ['BOVINA', 'SUINA', 'AVES', 'OVINA', 'PEIXES', 'EMBUTIDOS_OUTROS'] &&
+             data.unitSnapshot in ['KG', 'PECA', 'CAIXA'] &&
+             data.movementType in [
+               'ENTRADA', 'SAIDA_BALCAO', 'SAIDA_DESOSSA',
+               'PERDA_VENCIMENTO', 'PERDA_APARA', 'PERDA_TEMPERATURA', 'AJUSTE'
+             ] &&
+             data.quantity is number && data.quantity > 0 &&
+             data.estimatedLossBrl is number && data.estimatedLossBrl >= 0 &&
+             data.reason is string && data.reason.size() <= 300 &&
+             data.createdAtMillis is int && data.createdAtMillis > 0;
+    }
+
+    // --- Collection Rules ---
+
+    match /users/{userId} {
+      allow get, list: if isSignedIn() && request.auth.uid == userId;
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'email', 'displayName', 'activeShopId', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'email', 'displayName', 'activeShopId', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming()) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt);
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'activeShopId', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    match /invites/{inviteId} {
+      allow get: if isSignedIn() &&
+                    isValidId(inviteId) &&
+                    (existing().invitedByUid == request.auth.uid ||
+                     (request.auth.token.email_verified == true &&
+                      existing().emailLower == request.auth.token.email));
+
+      allow list: if isSignedIn() &&
+                     (existing().invitedByUid == request.auth.uid ||
+                      (request.auth.token.email_verified == true &&
+                       existing().emailLower == request.auth.token.email));
+
+      allow create: if isSignedIn() &&
+                       isValidId(inviteId) &&
+                       isValidInvite(incoming()) &&
+                       incoming().invitedByUid == request.auth.uid &&
+                       incoming().status == 'PENDING' &&
+                       incoming().keys().hasAll(['shopId', 'shopName', 'emailLower', 'assignedRole', 'invitedByUid', 'status', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['shopId', 'shopName', 'emailLower', 'assignedRole', 'invitedByUid', 'status', 'createdAt', 'updatedAt']) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isShopManager(incoming().shopId);
+
+      allow update: if isSignedIn() &&
+                       isValidId(inviteId) &&
+                       isValidInvite(incoming()) &&
+                       incoming().shopId == existing().shopId &&
+                       incoming().emailLower == existing().emailLower &&
+                       incoming().invitedByUid == existing().invitedByUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       (
+                         (isShopManager(existing().shopId) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['assignedRole', 'status', 'updatedAt'])) ||
+                         (request.auth.token.email_verified == true &&
+                          existing().emailLower == request.auth.token.email &&
+                          existing().status == 'PENDING' &&
+                          incoming().status == 'ACCEPTED' &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(inviteId) && isShopManager(existing().shopId);
+    }
+
+    match /shops/{shopId} {
+      allow get: if isSignedIn() &&
+                    isValidId(shopId) &&
+                    (request.auth.uid in existing().memberUids ||
+                     (shopId == 'amazonas_center' && isBootstrappedOwner()));
+
+      allow list: if isSignedIn() && request.auth.uid in existing().memberUids;
+
+      allow create: if isSignedIn() &&
+                       isValidId(shopId) &&
+                       isValidShop(incoming()) &&
+                       incoming().ownerId == request.auth.uid &&
+                       request.auth.uid in incoming().memberUids &&
+                       incoming().keys().hasAll(['name', 'ownerId', 'memberUids', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['name', 'ownerId', 'memberUids', 'createdAt', 'updatedAt']) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       (shopId != 'amazonas_center' || isBootstrappedOwner());
+
+      allow update: if isSignedIn() &&
+                       isValidId(shopId) &&
+                       isValidShop(incoming()) &&
+                       incoming().ownerId == existing().ownerId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       (
+                         (isShopManager(shopId) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'memberUids', 'updatedAt'])) ||
+                         (isActiveMember(shopId) &&
+                          request.auth.uid in incoming().memberUids &&
+                          incoming().memberUids.hasAll(existing().memberUids) &&
+                          incoming().memberUids.size() <= existing().memberUids.size() + 1 &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(shopId) && existing().ownerId == request.auth.uid;
+
+      match /members/{memberUid} {
+        allow get: if isSignedIn() &&
+                      isValidId(shopId) &&
+                      isValidId(memberUid) &&
+                      (request.auth.uid == memberUid || isShopManager(shopId));
+
+        allow list: if isSignedIn() &&
+                       (existing().userId == request.auth.uid ||
+                        existing().shopOwnerId == request.auth.uid ||
+                        request.auth.uid in existing().managerUids);
+
+        allow create: if isSignedIn() &&
+                         isValidId(shopId) &&
+                         isValidId(memberUid) &&
+                         isValidMember(incoming()) &&
+                         incoming().userId == memberUid &&
+                         incoming().shopId == shopId &&
+                         incoming().keys().hasAll(['userId', 'shopId', 'shopOwnerId', 'managerUids', 'email', 'displayName', 'role', 'active', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'shopId', 'shopOwnerId', 'managerUids', 'email', 'displayName', 'role', 'active', 'inviteId', 'createdAt', 'updatedAt']) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         (
+                           (isBootstrappedOwner() &&
+                            shopId == 'amazonas_center' &&
+                            memberUid == request.auth.uid &&
+                            incoming().role == 'GERENTE' &&
+                            incoming().active == true) ||
+                           (memberUid == request.auth.uid &&
+                            incoming().role == 'GERENTE' &&
+                            incoming().active == true &&
+                            exists(/databases/$(database)/documents/shops/$(shopId)) &&
+                            get(/databases/$(database)/documents/shops/$(shopId)).data.ownerId == request.auth.uid &&
+                            incoming().shopOwnerId == request.auth.uid) ||
+                           isShopManager(shopId) ||
+                           (memberUid == request.auth.uid &&
+                            incoming().active == true &&
+                            ('inviteId' in incoming()) &&
+                            isValidId(incoming().inviteId) &&
+                            exists(/databases/$(database)/documents/invites/$(incoming().inviteId)) &&
+                            get(/databases/$(database)/documents/invites/$(incoming().inviteId)).data.shopId == shopId &&
+                            get(/databases/$(database)/documents/invites/$(incoming().inviteId)).data.status == 'PENDING' &&
+                            request.auth.token.email_verified == true &&
+                            get(/databases/$(database)/documents/invites/$(incoming().inviteId)).data.emailLower == request.auth.token.email &&
+                            get(/databases/$(database)/documents/invites/$(incoming().inviteId)).data.assignedRole == incoming().role)
+                         );
+
+        allow update: if isSignedIn() &&
+                         isValidId(shopId) &&
+                         isValidId(memberUid) &&
+                         isValidMember(incoming()) &&
+                         isShopManager(shopId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().shopId == existing().shopId &&
+                         incoming().shopOwnerId == existing().shopOwnerId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['role', 'active', 'displayName', 'managerUids', 'updatedAt']);
+
+        allow delete: if isSignedIn() &&
+                         isValidId(shopId) &&
+                         isValidId(memberUid) &&
+                         isShopManager(shopId) &&
+                         memberUid != existing().shopOwnerId;
+      }
+
+      match /receiving_sessions/{sessionId} {
+        allow get: if isSignedIn() && isValidId(shopId) && isValidId(sessionId) && isActiveMember(shopId);
+
+        allow list: if isSignedIn() && request.auth.uid in existing().memberUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(shopId) &&
+                         isValidId(sessionId) &&
+                         isValidSession(incoming()) &&
+                         incoming().shopId == shopId &&
+                         incoming().createdByUid == request.auth.uid &&
+                         request.auth.uid in incoming().memberUids &&
+                         incoming().keys().hasAll([
+                           'shopId', 'memberUids', 'createdByUid', 'invoiceNumber', 'accessKey',
+                           'supplierName', 'supplierCnpj', 'receivedAtMillis', 'measuredTempCelsius',
+                           'targetZone', 'thermalStatus', 'responsibleName', 'sourceType', 'notes',
+                           'itemCount', 'totalKg', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'shopId', 'memberUids', 'createdByUid', 'invoiceNumber', 'accessKey',
+                           'supplierName', 'supplierCnpj', 'receivedAtMillis', 'measuredTempCelsius',
+                           'targetZone', 'thermalStatus', 'responsibleName', 'sourceType', 'notes',
+                           'itemCount', 'totalKg', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         canReceive(shopId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(shopId) &&
+                         isValidId(sessionId) &&
+                         isValidSession(incoming()) &&
+                         incoming().shopId == existing().shopId &&
+                         incoming().createdByUid == existing().createdByUid &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'invoiceNumber', 'supplierName', 'measuredTempCelsius', 'targetZone',
+                           'thermalStatus', 'responsibleName', 'notes', 'itemCount', 'totalKg',
+                           'memberUids', 'updatedAt'
+                         ]) &&
+                         canEditReceivingOrStock(shopId);
+
+        allow delete: if isSignedIn() && isValidId(shopId) && isValidId(sessionId) && canDeleteRecords(shopId);
+      }
+
+      match /cold_storage_items/{itemId} {
+        allow get: if isSignedIn() && isValidId(shopId) && isValidId(itemId) && isActiveMember(shopId);
+
+        allow list: if isSignedIn() && request.auth.uid in existing().memberUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(shopId) &&
+                         isValidId(itemId) &&
+                         isValidColdStorageItem(incoming()) &&
+                         incoming().shopId == shopId &&
+                         incoming().createdByUid == request.auth.uid &&
+                         request.auth.uid in incoming().memberUids &&
+                         incoming().keys().hasAll([
+                           'shopId', 'memberUids', 'createdByUid', 'sessionId', 'meatType', 'cutName',
+                           'temperatureZone', 'measuredTempCelsius', 'chamberName', 'batchCode', 'sifCode',
+                           'initialQuantity', 'currentQuantity', 'unit', 'unitCostBrl', 'expiryDateEpochDay',
+                           'receivedAtMillis', 'supplierName', 'invoiceNumber', 'notes', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'shopId', 'memberUids', 'createdByUid', 'sessionId', 'meatType', 'cutName',
+                           'temperatureZone', 'measuredTempCelsius', 'chamberName', 'batchCode', 'sifCode',
+                           'initialQuantity', 'currentQuantity', 'unit', 'unitCostBrl', 'expiryDateEpochDay',
+                           'receivedAtMillis', 'supplierName', 'invoiceNumber', 'notes', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         canReceive(shopId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(shopId) &&
+                         isValidId(itemId) &&
+                         isValidColdStorageItem(incoming()) &&
+                         incoming().shopId == existing().shopId &&
+                         incoming().createdByUid == existing().createdByUid &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'currentQuantity', 'chamberName', 'temperatureZone', 'measuredTempCelsius',
+                           'expiryDateEpochDay', 'cutName', 'batchCode', 'sifCode', 'notes',
+                           'memberUids', 'updatedAt'
+                         ]) &&
+                         canEditReceivingOrStock(shopId);
+
+        allow delete: if isSignedIn() && isValidId(shopId) && isValidId(itemId) && canDeleteRecords(shopId);
+      }
+
+      match /stock_movements/{movementId} {
+        allow get: if isSignedIn() && isValidId(shopId) && isValidId(movementId) && isActiveMember(shopId);
+
+        allow list: if isSignedIn() && request.auth.uid in existing().memberUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(shopId) &&
+                         isValidId(movementId) &&
+                         isValidStockMovement(incoming()) &&
+                         incoming().shopId == shopId &&
+                         incoming().createdByUid == request.auth.uid &&
+                         request.auth.uid in incoming().memberUids &&
+                         incoming().keys().hasAll([
+                           'shopId', 'memberUids', 'createdByUid', 'createdByName', 'itemId',
+                           'cutNameSnapshot', 'meatTypeSnapshot', 'unitSnapshot', 'movementType',
+                           'quantity', 'estimatedLossBrl', 'reason', 'createdAtMillis', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'shopId', 'memberUids', 'createdByUid', 'createdByName', 'itemId',
+                           'cutNameSnapshot', 'meatTypeSnapshot', 'unitSnapshot', 'movementType',
+                           'quantity', 'estimatedLossBrl', 'reason', 'createdAtMillis', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         (
+                           (incoming().movementType == 'ENTRADA' && canReceive(shopId)) ||
+                           (incoming().movementType != 'ENTRADA' && canEditReceivingOrStock(shopId))
+                         );
+
+        allow update: if false;
+
+        allow delete: if isSignedIn() && isValidId(shopId) && isValidId(movementId) && canDeleteRecords(shopId);
+      }
+    }
+  }
+}

@@ -1,61 +1,119 @@
 package com.example.data
 
-import androidx.room.Entity
-import androidx.room.ForeignKey
-import androidx.room.Index
-import androidx.room.PrimaryKey
+import androidx.annotation.Keep
+import com.google.firebase.Timestamp
+import com.google.firebase.firestore.DocumentId
+import com.google.firebase.firestore.IgnoreExtraProperties
+import com.google.firebase.firestore.ServerTimestamp
 
-@Entity(tableName = "receiving_sessions")
+@Keep
+@IgnoreExtraProperties
+data class UserProfile(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val email: String = "",
+    val displayName: String = "",
+    val activeShopId: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class ShopInfo(
+    @DocumentId val id: String = "",
+    val name: String = "",
+    val ownerId: String = "",
+    val memberUids: List<String> = emptyList(),
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+)
+
+@Keep
+@IgnoreExtraProperties
+data class ShopMember(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val shopId: String = "",
+    val shopOwnerId: String = "",
+    val managerUids: List<String> = emptyList(),
+    val email: String = "",
+    val displayName: String = "",
+    val role: String = StaffRole.OPERADOR.name,
+    val active: Boolean = true,
+    val inviteId: String? = null,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    val roleEnum: StaffRole get() = StaffRole.fromRaw(role)
+}
+
+@Keep
+@IgnoreExtraProperties
+data class TeamInvite(
+    @DocumentId val id: String = "",
+    val shopId: String = "",
+    val shopName: String = "",
+    val emailLower: String = "",
+    val assignedRole: String = StaffRole.OPERADOR.name,
+    val invitedByUid: String = "",
+    val status: String = "PENDING",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    val roleEnum: StaffRole get() = StaffRole.fromRaw(assignedRole)
+}
+
+@Keep
+@IgnoreExtraProperties
 data class ReceivingSessionEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val invoiceNumber: String,
+    @DocumentId val id: String = "",
+    val shopId: String = "",
+    val memberUids: List<String> = emptyList(),
+    val createdByUid: String = "",
+    val invoiceNumber: String = "",
     val accessKey: String = "",
-    val supplierName: String,
+    val supplierName: String = "",
     val supplierCnpj: String = "",
     val receivedAtMillis: Long = System.currentTimeMillis(),
-    val measuredTempCelsius: Double,
-    val targetZone: String,
-    val thermalStatus: String,
+    val measuredTempCelsius: Double = 2.0,
+    val targetZone: String = TemperatureZone.RESFRIADO.name,
+    val thermalStatus: String = ThermalCompliance.CONFORME.name,
     val responsibleName: String = "",
-    val sourceType: String,
-    val notes: String = ""
+    val sourceType: String = InvoiceSourceType.MANUAL.name,
+    val notes: String = "",
+    val itemCount: Int = 0,
+    val totalKg: Double = 0.0,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
 )
 
-@Entity(
-    tableName = "cold_storage_items",
-    foreignKeys = [
-        ForeignKey(
-            entity = ReceivingSessionEntity::class,
-            parentColumns = ["id"],
-            childColumns = ["sessionId"],
-            onDelete = ForeignKey.SET_NULL
-        )
-    ],
-    indices = [
-        Index(value = ["sessionId"]),
-        Index(value = ["expiryDateEpochDay"]),
-        Index(value = ["meatType"])
-    ]
-)
+@Keep
+@IgnoreExtraProperties
 data class ColdStorageItemEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val sessionId: Long? = null,
-    val meatType: String,
-    val cutName: String,
-    val temperatureZone: String,
-    val measuredTempCelsius: Double,
-    val chamberName: String,
+    @DocumentId val id: String = "",
+    val shopId: String = "",
+    val memberUids: List<String> = emptyList(),
+    val createdByUid: String = "",
+    val sessionId: String = "",
+    val meatType: String = MeatType.BOVINA.name,
+    val cutName: String = "",
+    val temperatureZone: String = TemperatureZone.RESFRIADO.name,
+    val measuredTempCelsius: Double = 2.0,
+    val chamberName: String = TemperatureZone.RESFRIADO.defaultChamber,
     val batchCode: String = "",
     val sifCode: String = "",
-    val initialQuantity: Double,
-    val currentQuantity: Double,
-    val unit: String,
+    val initialQuantity: Double = 0.0,
+    val currentQuantity: Double = 0.0,
+    val unit: String = MeasurementUnit.KG.name,
     val unitCostBrl: Double = 0.0,
-    val expiryDateEpochDay: Long,
+    val expiryDateEpochDay: Long = DateUtils.addDaysToTodayEpochDay(7),
     val receivedAtMillis: Long = System.currentTimeMillis(),
     val supplierName: String = "",
     val invoiceNumber: String = "",
-    val notes: String = ""
+    val notes: String = "",
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     val meatTypeEnum: MeatType get() = MeatType.fromRaw(meatType)
     val zoneEnum: TemperatureZone get() = TemperatureZone.fromRaw(temperatureZone)
@@ -65,25 +123,25 @@ data class ColdStorageItemEntity(
         get() = ThermalCompliance.evaluate(zoneEnum, measuredTempCelsius)
 }
 
-@Entity(
-    tableName = "stock_movements",
-    indices = [
-        Index(value = ["itemId"]),
-        Index(value = ["createdAtMillis"]),
-        Index(value = ["movementType"])
-    ]
-)
+@Keep
+@IgnoreExtraProperties
 data class StockMovementEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val itemId: Long,
-    val cutNameSnapshot: String,
-    val meatTypeSnapshot: String,
-    val unitSnapshot: String,
-    val movementType: String,
-    val quantity: Double,
+    @DocumentId val id: String = "",
+    val shopId: String = "",
+    val memberUids: List<String> = emptyList(),
+    val createdByUid: String = "",
+    val createdByName: String = "",
+    val itemId: String = "",
+    val cutNameSnapshot: String = "",
+    val meatTypeSnapshot: String = MeatType.BOVINA.name,
+    val unitSnapshot: String = MeasurementUnit.KG.name,
+    val movementType: String = MovementType.SAIDA_BALCAO.name,
+    val quantity: Double = 0.0,
     val estimatedLossBrl: Double = 0.0,
     val reason: String = "",
-    val createdAtMillis: Long = System.currentTimeMillis()
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     val movementTypeEnum: MovementType get() = MovementType.fromRaw(movementType)
     val meatTypeEnum: MeatType get() = MeatType.fromRaw(meatTypeSnapshot)
@@ -91,16 +149,16 @@ data class StockMovementEntity(
 }
 
 data class ReceivingSessionSummary(
-    val id: Long,
-    val invoiceNumber: String,
-    val supplierName: String,
-    val receivedAtMillis: Long,
-    val measuredTempCelsius: Double,
-    val targetZone: String,
-    val thermalStatus: String,
-    val sourceType: String,
-    val responsibleName: String,
-    val itemCount: Int,
-    val totalKg: Double,
+    val id: String = "",
+    val invoiceNumber: String = "",
+    val supplierName: String = "",
+    val receivedAtMillis: Long = 0L,
+    val measuredTempCelsius: Double = 2.0,
+    val targetZone: String = TemperatureZone.RESFRIADO.name,
+    val thermalStatus: String = ThermalCompliance.CONFORME.name,
+    val sourceType: String = InvoiceSourceType.MANUAL.name,
+    val responsibleName: String = "",
+    val itemCount: Int = 0,
+    val totalKg: Double = 0.0,
     val notes: String = ""
 )

@@ -1,5 +1,6 @@
 package com.example.ui.viewmodel
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ColdStorageItemEntity
@@ -8,12 +9,15 @@ import com.example.data.ExpiryUrgency
 import com.example.data.MeatType
 import com.example.data.MeasurementUnit
 import com.example.data.MovementType
+import com.example.data.ShopSessionState
+import com.example.data.StaffRole
 import com.example.data.StockMovementEntity
 import com.example.data.TemperatureZone
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -35,7 +39,9 @@ data class InventoryUiState(
     val filteredItems: List<ColdStorageItemEntity> = emptyList(),
     val totalFilteredKg: Double = 0.0,
     val totalFilteredOtherUnits: Int = 0,
-    val feedbackMessage: String? = null
+    val activeRole: StaffRole = StaffRole.OPERADOR,
+    val feedbackMessage: String? = null,
+    val streamError: String? = null
 )
 
 class InventoryViewModel(
@@ -51,6 +57,7 @@ class InventoryViewModel(
 
     val uiState: StateFlow<InventoryUiState> = combine(
         repository.activeItemsFefo,
+        repository.sessionState,
         _searchQuery,
         _selectedMeat,
         _selectedZone,
@@ -60,12 +67,13 @@ class InventoryViewModel(
     ) { values ->
         @Suppress("UNCHECKED_CAST")
         val items = values[0] as List<ColdStorageItemEntity>
-        val query = values[1] as String
-        val meat = values[2] as MeatType?
-        val zone = values[3] as TemperatureZone?
-        val supplier = values[4] as String?
-        val urgency = values[5] as UrgencyFilter
-        val feedback = values[6] as String?
+        val session = values[1] as ShopSessionState
+        val query = values[2] as String
+        val meat = values[3] as MeatType?
+        val zone = values[4] as TemperatureZone?
+        val supplier = values[5] as String?
+        val urgency = values[6] as UrgencyFilter
+        val feedback = values[7] as String?
 
         val availableSuppliers = items.map { it.supplierName }.filter { it.isNotBlank() }.distinct().sorted()
 
@@ -110,7 +118,17 @@ class InventoryViewModel(
             filteredItems = filtered,
             totalFilteredKg = totalKg,
             totalFilteredOtherUnits = totalOtherUnits,
-            feedbackMessage = feedback
+            activeRole = session.activeRole,
+            feedbackMessage = feedback,
+            streamError = session.errorMessage
+        )
+    }.catch { error ->
+        val rootError = unwrapFirestoreStreamError(error)
+        Log.w("InventoryVM", "Error observing inventory", rootError)
+        emit(
+            InventoryUiState(
+                streamError = friendlyFirestoreMessage(rootError, "Falha ao carregar estoque.")
+            )
         )
     }.stateIn(
         scope = viewModelScope,
@@ -138,48 +156,76 @@ class InventoryViewModel(
         _urgencyFilter.value = filter
     }
 
-    fun observeMovementsForItem(itemId: Long): Flow<List<StockMovementEntity>> =
-        repository.observeMovementsForItem(itemId)
+    fun observeMovementsForItem(itemId: String): Flow<List<StockMovementEntity>> =
+        repository.observeMovementsForItem(itemId).catch { error ->
+            val rootError = unwrapFirestoreStreamError(error)
+            Log.w("InventoryVM", "Error observing item movements", rootError)
+            emit(emptyList())
+        }
 
     fun recordStockOut(
-        itemId: Long,
+        itemId: String,
         movementType: MovementType,
         quantity: Double,
         reason: String
     ) {
         viewModelScope.launch {
-            val ok = repository.recordStockOut(itemId, movementType, quantity, reason)
-            _feedback.value = if (ok) {
-                "Baixa registrada com sucesso."
-            } else {
-                "Quantidade inválida para baixa."
-            }
+            repository.recordStockOut(itemId, movementType, quantity, reason).fold(
+                onSuccess = { ok ->
+                    _feedback.value = if (ok) {
+                        "Baixa registrada com sucesso."
+                    } else {
+                        "Quantidade inválida para baixa."
+                    }
+                },
+                onFailure = { err ->
+                    _feedback.value = friendlyFirestoreMessage(err, "Erro ao registrar baixa.")
+                }
+            )
         }
     }
 
     fun transferChamber(
-        itemId: Long,
+        itemId: String,
         chamberName: String,
         zone: TemperatureZone,
         tempCelsius: Double
     ) {
         viewModelScope.launch {
-            repository.transferChamber(itemId, chamberName, zone, tempCelsius)
-            _feedback.value = "Lote transferido para $chamberName."
+            repository.transferChamber(itemId, chamberName, zone, tempCelsius).fold(
+                onSuccess = {
+                    _feedback.value = "Lote atualizado para $chamberName."
+                },
+                onFailure = { err ->
+                    _feedback.value = friendlyFirestoreMessage(err, "Erro ao atualizar câmara/temperatura.")
+                }
+            )
         }
     }
 
-    fun updateExpiry(itemId: Long, expiryEpochDay: Long) {
+    fun updateExpiry(itemId: String, expiryEpochDay: Long) {
         viewModelScope.launch {
-            repository.updateExpiry(itemId, expiryEpochDay)
-            _feedback.value = "Validade atualizada."
+            repository.updateExpiry(itemId, expiryEpochDay).fold(
+                onSuccess = {
+                    _feedback.value = "Validade atualizada."
+                },
+                onFailure = { err ->
+                    _feedback.value = friendlyFirestoreMessage(err, "Erro ao atualizar validade.")
+                }
+            )
         }
     }
 
-    fun deleteItem(itemId: Long) {
+    fun deleteItem(itemId: String) {
         viewModelScope.launch {
-            repository.deleteItem(itemId)
-            _feedback.value = "Lote removido do estoque."
+            repository.deleteItem(itemId).fold(
+                onSuccess = {
+                    _feedback.value = "Lote removido do estoque."
+                },
+                onFailure = { err ->
+                    _feedback.value = friendlyFirestoreMessage(err, "Apenas o gerente pode excluir lotes.")
+                }
+            )
         }
     }
 

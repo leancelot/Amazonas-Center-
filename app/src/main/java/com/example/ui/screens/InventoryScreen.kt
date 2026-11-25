@@ -22,6 +22,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowOutward
+import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Search
@@ -30,6 +31,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -43,8 +46,10 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -64,6 +69,7 @@ import com.example.R
 import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
 import com.example.data.MeatType
+import com.example.data.StaffRole
 import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
 import com.example.ui.components.ExpiryUrgencyBadge
@@ -254,6 +260,7 @@ fun InventoryScreen(
                     items(state.filteredItems, key = { "${it.id}_${it.currentQuantity}" }) { item ->
                         InventoryLotCard(
                             item = item,
+                            canEditStock = state.activeRole.canEditReceivingOrStock,
                             onClick = { selectedItem = item },
                             onQuickStockOut = { stockOutItem = item }
                         )
@@ -266,6 +273,7 @@ fun InventoryScreen(
     selectedItem?.let { item ->
         ItemDetailSheet(
             item = item,
+            activeRole = state.activeRole,
             viewModel = viewModel,
             onDismiss = { selectedItem = null },
             onRequestStockOut = {
@@ -290,6 +298,7 @@ fun InventoryScreen(
 @Composable
 private fun InventoryLotCard(
     item: ColdStorageItemEntity,
+    canEditStock: Boolean,
     onClick: () -> Unit,
     onQuickStockOut: () -> Unit
 ) {
@@ -353,15 +362,17 @@ private fun InventoryLotCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 ExpiryUrgencyBadge(expiryEpochDay = item.expiryDateEpochDay)
-                OutlinedButton(
-                    onClick = onQuickStockOut,
-                    modifier = Modifier
-                        .height(48.dp)
-                        .testTag("inventory_stock_out_${item.id}")
-                ) {
-                    Icon(Icons.Rounded.ArrowOutward, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Baixa")
+                if (canEditStock) {
+                    OutlinedButton(
+                        onClick = onQuickStockOut,
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("inventory_stock_out_${item.id}")
+                    ) {
+                        Icon(Icons.Rounded.ArrowOutward, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Baixa")
+                    }
                 }
             }
         }
@@ -372,6 +383,7 @@ private fun InventoryLotCard(
 @Composable
 private fun ItemDetailSheet(
     item: ColdStorageItemEntity,
+    activeRole: StaffRole,
     viewModel: InventoryViewModel,
     onDismiss: () -> Unit,
     onRequestStockOut: () -> Unit
@@ -379,10 +391,13 @@ private fun ItemDetailSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val movements by viewModel.observeMovementsForItem(item.id).collectAsStateWithLifecycle(initialValue = emptyList())
     var showTransferMode by remember { mutableStateOf(false) }
+    var showExpiryPicker by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var newZone by remember { mutableStateOf(item.zoneEnum) }
     var newChamber by remember { mutableStateOf(item.chamberName) }
     var newTempText by remember { mutableStateOf(String.format(Locale.US, "%.1f", item.measuredTempCelsius)) }
+    val canEditStock = activeRole.canEditReceivingOrStock
+    val canDelete = activeRole.canDeleteRecords
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -497,31 +512,57 @@ private fun ItemDetailSheet(
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Button(
-                    onClick = onRequestStockOut,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
-                        .testTag("detail_stock_out_button")
+            if (canEditStock) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Icon(Icons.Rounded.ArrowOutward, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Dar Baixa")
+                    Button(
+                        onClick = onRequestStockOut,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("detail_stock_out_button")
+                    ) {
+                        Icon(Icons.Rounded.ArrowOutward, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Dar Baixa")
+                    }
+                    OutlinedButton(
+                        onClick = { showTransferMode = !showTransferMode },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("detail_transfer_button")
+                    ) {
+                        Icon(Icons.Rounded.SwapHoriz, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Transferir")
+                    }
                 }
                 OutlinedButton(
-                    onClick = { showTransferMode = !showTransferMode },
+                    onClick = { showExpiryPicker = true },
                     modifier = Modifier
-                        .weight(1f)
+                        .fillMaxWidth()
                         .height(48.dp)
-                        .testTag("detail_transfer_button")
+                        .testTag("detail_edit_expiry_button")
                 ) {
-                    Icon(Icons.Rounded.SwapHoriz, contentDescription = null)
+                    Icon(Icons.Rounded.CalendarMonth, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
-                    Text("Transferir")
+                    Text("Alterar Validade (${DateUtils.formatEpochDay(item.expiryDateEpochDay)})")
+                }
+            } else {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Cargo ${activeRole.displayName}: somente Gerente, Conferente ou Resp. Câmara Fria alteram estoque e baixas.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(12.dp)
+                    )
                 }
             }
 
@@ -552,15 +593,46 @@ private fun ItemDetailSheet(
                 }
             }
 
-            TextButton(
-                onClick = { showDeleteConfirm = true },
-                modifier = Modifier.align(Alignment.End)
-            ) {
-                Icon(Icons.Rounded.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
-                Spacer(Modifier.width(4.dp))
-                Text("Excluir lote", color = MaterialTheme.colorScheme.error)
+            if (canDelete) {
+                TextButton(
+                    onClick = { showDeleteConfirm = true },
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Icon(Icons.Rounded.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Excluir lote", color = MaterialTheme.colorScheme.error)
+                }
             }
         }
+        }
+    }
+
+    if (showExpiryPicker) {
+        val datePickerState = rememberDatePickerState(
+            initialSelectedDateMillis = DateUtils.epochDayToUtcPickerMillis(item.expiryDateEpochDay)
+        )
+        DatePickerDialog(
+            onDismissRequest = { showExpiryPicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        datePickerState.selectedDateMillis?.let { millis ->
+                            viewModel.updateExpiry(item.id, DateUtils.millisToEpochDay(millis))
+                        }
+                        showExpiryPicker = false
+                        onDismiss()
+                    }
+                ) {
+                    Text("Confirmar")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExpiryPicker = false }) {
+                    Text("Cancelar")
+                }
+            }
+        ) {
+            DatePicker(state = datePickerState)
         }
     }
 

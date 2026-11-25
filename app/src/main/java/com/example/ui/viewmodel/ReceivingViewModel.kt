@@ -2,6 +2,7 @@ package com.example.ui.viewmodel
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ColdStorageItemEntity
@@ -10,6 +11,7 @@ import com.example.data.DateUtils
 import com.example.data.InvoiceSourceType
 import com.example.data.ReceivingSessionEntity
 import com.example.data.ReceivingSessionSummary
+import com.example.data.ShopSessionState
 import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
 import com.example.domain.invoice.DanfeQrParser
@@ -23,11 +25,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.abs
 
 sealed interface ExtractionUiState {
@@ -36,12 +40,14 @@ sealed interface ExtractionUiState {
     data class Success(
         val message: String,
         val rawOcrText: String = "",
-        val canRetryWithCloud: Boolean = false
+        val canRetryWithCloud: Boolean = false,
+        val canRetryFullVision: Boolean = false
     ) : ExtractionUiState
     data class Error(
         val message: String,
         val rawOcrText: String = "",
-        val canRetryWithCloud: Boolean = false
+        val canRetryWithCloud: Boolean = false,
+        val canRetryFullVision: Boolean = false
     ) : ExtractionUiState
 }
 
@@ -65,6 +71,12 @@ data class ReceivingFormState(
         get() = parsedTempCelsius?.let { ThermalCompliance.evaluate(targetZone, it) }
 }
 
+data class ParkedReceivingDraft(
+    val id: String = UUID.randomUUID().toString(),
+    val parkedAtMillis: Long = System.currentTimeMillis(),
+    val form: ReceivingFormState
+)
+
 class ReceivingViewModel(
     private val repository: ColdStorageRepository,
     private val localExtractor: InvoiceLocalExtractor,
@@ -77,10 +89,31 @@ class ReceivingViewModel(
     private val _extractionState = MutableStateFlow<ExtractionUiState>(ExtractionUiState.Idle)
     val extractionState: StateFlow<ExtractionUiState> = _extractionState.asStateFlow()
 
+    private val _pendingQueue = MutableStateFlow<List<ParkedReceivingDraft>>(emptyList())
+    val pendingQueue: StateFlow<List<ParkedReceivingDraft>> = _pendingQueue.asStateFlow()
+
     private var lastMediaUri: Uri? = null
     private var lastMediaIsPdf: Boolean = false
+    private var lastRawOcrText: String = ""
+
+    val sessionState: StateFlow<ShopSessionState> = repository.sessionState
+        .catch { error ->
+            val rootError = unwrapFirestoreStreamError(error)
+            Log.w("ReceivingVM", "Error observing session", rootError)
+            emit(ShopSessionState(isLoading = false, errorMessage = rootError.localizedMessage))
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = ShopSessionState()
+        )
 
     val pastSessions: StateFlow<List<ReceivingSessionSummary>> = repository.sessionSummaries
+        .catch { error ->
+            val rootError = unwrapFirestoreStreamError(error)
+            Log.w("ReceivingVM", "Error observing past sessions", rootError)
+            emit(emptyList())
+        }
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
@@ -163,6 +196,41 @@ class ReceivingViewModel(
         }
     }
 
+    fun parkCurrentEntryInQueue(): Boolean {
+        val current = _formState.value
+        if (current.items.isEmpty() && current.invoiceNumber.isBlank() && current.supplierName.isBlank()) {
+            return false
+        }
+        val parked = ParkedReceivingDraft(form = current.copy(isSaving = false))
+        _pendingQueue.update { listOf(parked) + it }
+        val keepResponsible = current.responsibleName
+        _formState.value = ReceivingFormState(responsibleName = keepResponsible)
+        lastMediaUri = null
+        lastRawOcrText = ""
+        _extractionState.value = ExtractionUiState.Idle
+        return true
+    }
+
+    fun resumeParkedEntry(id: String) {
+        val target = _pendingQueue.value.firstOrNull { it.id == id } ?: return
+        val current = _formState.value
+        val hasUnsavedCurrent = current.items.isNotEmpty() || current.invoiceNumber.isNotBlank()
+        _pendingQueue.update { queue ->
+            val filtered = queue.filterNot { it.id == id }
+            if (hasUnsavedCurrent) {
+                listOf(ParkedReceivingDraft(form = current.copy(isSaving = false))) + filtered
+            } else {
+                filtered
+            }
+        }
+        _formState.value = target.form
+        _extractionState.value = ExtractionUiState.Idle
+    }
+
+    fun removeParkedEntry(id: String) {
+        _pendingQueue.update { queue -> queue.filterNot { it.id == id } }
+    }
+
     fun clearExtractionBanner() {
         _extractionState.value = ExtractionUiState.Idle
     }
@@ -171,6 +239,7 @@ class ReceivingViewModel(
         lastMediaUri = null
         viewModelScope.launch {
             _extractionState.value = ExtractionUiState.Loading("Lendo arquivo XML da NF-e...")
+            val startedAt = System.currentTimeMillis()
             val result = withContext(Dispatchers.IO) {
                 val stream = context.contentResolver.openInputStream(uri)
                     ?: return@withContext Result.failure<ParsedInvoiceDraft>(
@@ -178,11 +247,12 @@ class ReceivingViewModel(
                     )
                 stream.use { NfeXmlParser.parse(it) }
             }
+            val elapsed = formatElapsedSeconds(startedAt)
             result.fold(
                 onSuccess = { draft ->
                     applyParsedDraft(draft, replaceItems = true)
                     _extractionState.value = ExtractionUiState.Success(
-                        message = "XML NF-e ${draft.invoiceNumber.ifBlank { "" }} importado com ${draft.items.size} produto(s)."
+                        message = "XML NF-e ${draft.invoiceNumber.ifBlank { "" }} importado ($elapsed) com ${draft.items.size} produto(s)."
                     )
                 },
                 onFailure = { err ->
@@ -198,8 +268,10 @@ class ReceivingViewModel(
         lastMediaUri = uri
         lastMediaIsPdf = false
         viewModelScope.launch {
-            _extractionState.value = ExtractionUiState.Loading("Lendo foto e anotações no aparelho (OCR offline)...")
+            val startedAt = System.currentTimeMillis()
+            _extractionState.value = ExtractionUiState.Loading("Lendo foto no aparelho (OCR offline)...")
             val result = localExtractor.extractFromImageUri(context, uri)
+            val elapsed = formatElapsedSeconds(startedAt)
             result.fold(
                 onSuccess = { draft ->
                     lastRawOcrText = draft.rawOcrText
@@ -210,7 +282,7 @@ class ReceivingViewModel(
                         draft.items.firstOrNull()?.temperatureZone ?: _formState.value.targetZone
                     )
                     _extractionState.value = ExtractionUiState.Success(
-                        message = buildLocalSuccessMessage("Foto lida offline", draft, warning),
+                        message = buildLocalSuccessMessage("Foto lida offline ($elapsed)", draft, warning),
                         rawOcrText = draft.rawOcrText,
                         canRetryWithCloud = true
                     )
@@ -229,8 +301,10 @@ class ReceivingViewModel(
         lastMediaUri = uri
         lastMediaIsPdf = true
         viewModelScope.launch {
-            _extractionState.value = ExtractionUiState.Loading("Lendo PDF e anotações no aparelho (OCR offline)...")
+            val startedAt = System.currentTimeMillis()
+            _extractionState.value = ExtractionUiState.Loading("Lendo PDF no aparelho (OCR offline)...")
             val result = localExtractor.extractFromPdfUri(context, uri)
+            val elapsed = formatElapsedSeconds(startedAt)
             result.fold(
                 onSuccess = { draft ->
                     lastRawOcrText = draft.rawOcrText
@@ -241,7 +315,7 @@ class ReceivingViewModel(
                         draft.items.firstOrNull()?.temperatureZone ?: _formState.value.targetZone
                     )
                     _extractionState.value = ExtractionUiState.Success(
-                        message = buildLocalSuccessMessage("PDF lido offline", draft, warning),
+                        message = buildLocalSuccessMessage("PDF lido offline ($elapsed)", draft, warning),
                         rawOcrText = draft.rawOcrText,
                         canRetryWithCloud = true
                     )
@@ -256,26 +330,154 @@ class ReceivingViewModel(
         }
     }
 
-    private var lastRawOcrText: String = ""
+    fun extractFastAiFromImageUri(context: Context, uri: Uri) {
+        lastMediaUri = uri
+        lastMediaIsPdf = false
+        viewModelScope.launch {
+            val startedAt = System.currentTimeMillis()
+            _extractionState.value = ExtractionUiState.Loading("1/2 Capturando texto da foto no aparelho...")
+            val snapshot = localExtractor.extractSnapshotFromImageUri(context, uri).getOrNull()
+            val ocrText = snapshot?.reconstructedText.orEmpty()
+            lastRawOcrText = ocrText
+
+            if (ocrText.length >= 60 && (snapshot?.lineCount ?: 0) >= 3) {
+                _extractionState.value = ExtractionUiState.Loading("2/2 Estruturando itens com IA rápida...")
+                val textAiResult = aiExtractor.extractFromOcrText(
+                    context = context,
+                    rawText = ocrText,
+                    sourceType = InvoiceSourceType.IA_FOTO
+                )
+                val parsedViaText = textAiResult.getOrNull()
+                if (parsedViaText != null && parsedViaText.items.isNotEmpty()) {
+                    applyParsedDraft(parsedViaText, replaceItems = false)
+                    val elapsed = formatElapsedSeconds(startedAt)
+                    val warning = checkThermalConsistency(
+                        parsedViaText.items,
+                        parsedViaText.extractedTempCelsius ?: _formState.value.parsedTempCelsius,
+                        parsedViaText.items.firstOrNull()?.temperatureZone ?: _formState.value.targetZone
+                    )
+                    _extractionState.value = ExtractionUiState.Success(
+                        message = buildFastAiSuccessMessage(parsedViaText, elapsed, warning),
+                        rawOcrText = ocrText,
+                        canRetryFullVision = true
+                    )
+                    return@launch
+                }
+            }
+
+            // Fallback to compact JPEG upload when OCR is sparse (handwriting / low contrast)
+            _extractionState.value = ExtractionUiState.Loading("Analisando imagem compactada com IA...")
+            val result = aiExtractor.extractFromImageUri(context, uri)
+            val elapsed = formatElapsedSeconds(startedAt)
+            result.fold(
+                onSuccess = { draft ->
+                    applyParsedDraft(draft, replaceItems = false)
+                    val warning = checkThermalConsistency(
+                        draft.items,
+                        draft.extractedTempCelsius ?: _formState.value.parsedTempCelsius,
+                        draft.items.firstOrNull()?.temperatureZone ?: _formState.value.targetZone
+                    )
+                    _extractionState.value = ExtractionUiState.Success(
+                        message = buildFastAiSuccessMessage(draft, elapsed, warning),
+                        rawOcrText = ocrText
+                    )
+                },
+                onFailure = { err ->
+                    _extractionState.value = ExtractionUiState.Error(
+                        message = err.localizedMessage ?: "Não foi possível consultar a IA na nuvem.",
+                        rawOcrText = ocrText,
+                        canRetryFullVision = true
+                    )
+                }
+            )
+        }
+    }
+
+    fun extractFastAiFromPdfUri(context: Context, uri: Uri) {
+        lastMediaUri = uri
+        lastMediaIsPdf = true
+        viewModelScope.launch {
+            val startedAt = System.currentTimeMillis()
+            _extractionState.value = ExtractionUiState.Loading("1/2 Extraindo texto das páginas do PDF...")
+            val snapshot = localExtractor.extractSnapshotFromPdfUri(context, uri).getOrNull()
+            val ocrText = snapshot?.reconstructedText.orEmpty()
+            lastRawOcrText = ocrText
+
+            if (ocrText.length >= 60 && (snapshot?.lineCount ?: 0) >= 3) {
+                _extractionState.value = ExtractionUiState.Loading("2/2 Estruturando itens do PDF com IA rápida...")
+                val textAiResult = aiExtractor.extractFromOcrText(
+                    context = context,
+                    rawText = ocrText,
+                    sourceType = InvoiceSourceType.IA_PDF
+                )
+                val parsedViaText = textAiResult.getOrNull()
+                if (parsedViaText != null && parsedViaText.items.isNotEmpty()) {
+                    applyParsedDraft(parsedViaText, replaceItems = false)
+                    val elapsed = formatElapsedSeconds(startedAt)
+                    val warning = checkThermalConsistency(
+                        parsedViaText.items,
+                        parsedViaText.extractedTempCelsius ?: _formState.value.parsedTempCelsius,
+                        parsedViaText.items.firstOrNull()?.temperatureZone ?: _formState.value.targetZone
+                    )
+                    _extractionState.value = ExtractionUiState.Success(
+                        message = buildFastAiSuccessMessage(parsedViaText, elapsed, warning),
+                        rawOcrText = ocrText,
+                        canRetryFullVision = true
+                    )
+                    return@launch
+                }
+            }
+
+            _extractionState.value = ExtractionUiState.Loading("Enviando PDF para leitura visual por IA...")
+            val result = aiExtractor.extractFromPdfUri(context, uri)
+            val elapsed = formatElapsedSeconds(startedAt)
+            result.fold(
+                onSuccess = { draft ->
+                    applyParsedDraft(draft, replaceItems = false)
+                    val warning = checkThermalConsistency(
+                        draft.items,
+                        draft.extractedTempCelsius ?: _formState.value.parsedTempCelsius,
+                        draft.items.firstOrNull()?.temperatureZone ?: _formState.value.targetZone
+                    )
+                    _extractionState.value = ExtractionUiState.Success(
+                        message = buildFastAiSuccessMessage(draft, elapsed, warning),
+                        rawOcrText = ocrText
+                    )
+                },
+                onFailure = { err ->
+                    _extractionState.value = ExtractionUiState.Error(
+                        message = err.localizedMessage ?: "Não foi possível ler o PDF com IA.",
+                        rawOcrText = ocrText,
+                        canRetryFullVision = true
+                    )
+                }
+            )
+        }
+    }
 
     fun retryLastMediaWithCloudReserve(context: Context) {
         val ocrText = lastRawOcrText
         if (ocrText.isNotBlank()) {
             viewModelScope.launch {
-                _extractionState.value = ExtractionUiState.Loading("Estruturando com IA na nuvem (modo texto eficiente)...")
-                val result = aiExtractor.extractFromOcrText(context, ocrText)
+                val startedAt = System.currentTimeMillis()
+                _extractionState.value = ExtractionUiState.Loading("Estruturando com IA rápida (modo texto)...")
+                val sourceType = if (lastMediaIsPdf) InvoiceSourceType.IA_PDF else InvoiceSourceType.IA_FOTO
+                val result = aiExtractor.extractFromOcrText(context, ocrText, sourceType)
+                val elapsed = formatElapsedSeconds(startedAt)
                 result.fold(
                     onSuccess = { draft ->
                         applyParsedDraft(draft, replaceItems = false)
                         _extractionState.value = ExtractionUiState.Success(
-                            message = "Nuvem (reserva): ${draft.items.size} produto(s) estruturado(s) com sucesso. Revise antes de salvar."
+                            message = buildFastAiSuccessMessage(draft, elapsed, null),
+                            rawOcrText = ocrText,
+                            canRetryFullVision = lastMediaUri != null
                         )
                     },
                     onFailure = { err ->
                         _extractionState.value = ExtractionUiState.Error(
                             message = err.localizedMessage ?: "Não foi possível consultar a IA na nuvem.",
                             rawOcrText = ocrText,
-                            canRetryWithCloud = true
+                            canRetryFullVision = lastMediaUri != null
                         )
                     }
                 )
@@ -283,54 +485,35 @@ class ReceivingViewModel(
             return
         }
 
+        reanalyzeLastMediaWithFullVision(context)
+    }
+
+    fun reanalyzeLastMediaWithFullVision(context: Context) {
         val uri = lastMediaUri ?: return
-        if (lastMediaIsPdf) {
-            extractWithCloudReserveFromPdfUri(context, uri)
-        } else {
-            extractWithCloudReserveFromImageUri(context, uri)
-        }
-    }
-
-    fun extractWithCloudReserveFromImageUri(context: Context, uri: Uri) {
-        lastMediaUri = uri
-        lastMediaIsPdf = false
         viewModelScope.launch {
-            _extractionState.value = ExtractionUiState.Loading("Reanalisando foto com IA na nuvem (reserva)...")
-            val result = aiExtractor.extractFromImageUri(context, uri)
-            result.fold(
-                onSuccess = { draft ->
-                    applyParsedDraft(draft, replaceItems = false)
-                    _extractionState.value = ExtractionUiState.Success(
-                        message = "Nuvem (reserva): ${draft.items.size} produto(s) extraído(s). Revise antes de salvar."
-                    )
-                },
-                onFailure = { err ->
-                    _extractionState.value = ExtractionUiState.Error(
-                        message = err.localizedMessage ?: "Não foi possível consultar a IA na nuvem.",
-                        canRetryWithCloud = true
-                    )
-                }
+            val startedAt = System.currentTimeMillis()
+            _extractionState.value = ExtractionUiState.Loading(
+                if (lastMediaIsPdf) "Analisando PDF completo com IA..." else "Analisando imagem completa com IA..."
             )
-        }
-    }
-
-    fun extractWithCloudReserveFromPdfUri(context: Context, uri: Uri) {
-        lastMediaUri = uri
-        lastMediaIsPdf = true
-        viewModelScope.launch {
-            _extractionState.value = ExtractionUiState.Loading("Reanalisando PDF com IA na nuvem (reserva)...")
-            val result = aiExtractor.extractFromPdfUri(context, uri)
+            val result = if (lastMediaIsPdf) {
+                aiExtractor.extractFromPdfUri(context, uri)
+            } else {
+                aiExtractor.extractFromImageUri(context, uri)
+            }
+            val elapsed = formatElapsedSeconds(startedAt)
             result.fold(
                 onSuccess = { draft ->
                     applyParsedDraft(draft, replaceItems = false)
                     _extractionState.value = ExtractionUiState.Success(
-                        message = "Nuvem (reserva): ${draft.items.size} produto(s) extraído(s). Revise antes de salvar."
+                        message = buildFastAiSuccessMessage(draft, elapsed, null),
+                        rawOcrText = lastRawOcrText
                     )
                 },
                 onFailure = { err ->
                     _extractionState.value = ExtractionUiState.Error(
                         message = err.localizedMessage ?: "Não foi possível consultar a IA na nuvem.",
-                        canRetryWithCloud = true
+                        rawOcrText = lastRawOcrText,
+                        canRetryFullVision = true
                     )
                 }
             )
@@ -370,74 +553,93 @@ class ReceivingViewModel(
         val nf = state.invoiceNumber.trim()
         val compliance = ThermalCompliance.evaluate(state.targetZone, temp)
         val now = System.currentTimeMillis()
+        val defaultResponsible = state.responsibleName.trim().ifBlank {
+            sessionState.value.currentMember?.displayName.orEmpty()
+        }
 
         viewModelScope.launch {
             _formState.update { it.copy(isSaving = true) }
-            try {
-                val session = ReceivingSessionEntity(
-                    invoiceNumber = nf,
-                    accessKey = state.accessKey.trim(),
-                    supplierName = supplier,
-                    supplierCnpj = state.supplierCnpj.trim(),
+            val session = ReceivingSessionEntity(
+                invoiceNumber = nf,
+                accessKey = state.accessKey.trim(),
+                supplierName = supplier,
+                supplierCnpj = state.supplierCnpj.trim(),
+                receivedAtMillis = now,
+                measuredTempCelsius = temp,
+                targetZone = state.targetZone.name,
+                thermalStatus = compliance.name,
+                responsibleName = defaultResponsible,
+                sourceType = state.sourceType.name,
+                notes = state.notes.trim()
+            )
+            val entities = state.items.map { item ->
+                ColdStorageItemEntity(
+                    meatType = item.meatType.name,
+                    cutName = item.cutName.trim().ifBlank { "Corte Diverso" },
+                    temperatureZone = item.temperatureZone.name,
+                    measuredTempCelsius = item.measuredTempCelsius,
+                    chamberName = item.chamberName.ifBlank { item.temperatureZone.defaultChamber },
+                    batchCode = item.batchCode.trim(),
+                    sifCode = item.sifCode.trim(),
+                    initialQuantity = item.quantity.coerceAtLeast(0.01),
+                    currentQuantity = item.quantity.coerceAtLeast(0.01),
+                    unit = item.unit.name,
+                    unitCostBrl = item.unitCostBrl.coerceAtLeast(0.0),
+                    expiryDateEpochDay = item.expiryEpochDay,
                     receivedAtMillis = now,
-                    measuredTempCelsius = temp,
-                    targetZone = state.targetZone.name,
-                    thermalStatus = compliance.name,
-                    responsibleName = state.responsibleName.trim(),
-                    sourceType = state.sourceType.name,
-                    notes = state.notes.trim()
-                )
-                val entities = state.items.map { item ->
-                    ColdStorageItemEntity(
-                        meatType = item.meatType.name,
-                        cutName = item.cutName.trim().ifBlank { "Corte Diverso" },
-                        temperatureZone = item.temperatureZone.name,
-                        measuredTempCelsius = item.measuredTempCelsius,
-                        chamberName = item.chamberName.ifBlank { item.temperatureZone.defaultChamber },
-                        batchCode = item.batchCode.trim(),
-                        sifCode = item.sifCode.trim(),
-                        initialQuantity = item.quantity.coerceAtLeast(0.01),
-                        currentQuantity = item.quantity.coerceAtLeast(0.01),
-                        unit = item.unit.name,
-                        unitCostBrl = item.unitCostBrl.coerceAtLeast(0.0),
-                        expiryDateEpochDay = item.expiryEpochDay,
-                        receivedAtMillis = now,
-                        supplierName = supplier,
-                        invoiceNumber = nf,
-                        notes = item.notes.trim()
-                    )
-                }
-                repository.saveReceivingSession(session, entities)
-                lastMediaUri = null
-                _formState.value = ReceivingFormState()
-                _extractionState.value = ExtractionUiState.Success(
-                    "Recebimento salvo! ${entities.size} lote(s) entraram na câmara fria."
-                )
-            } catch (e: Exception) {
-                _formState.update { it.copy(isSaving = false) }
-                _extractionState.value = ExtractionUiState.Error(
-                    "Erro ao salvar no banco local: ${e.localizedMessage ?: "tente novamente"}"
+                    supplierName = supplier,
+                    invoiceNumber = nf,
+                    notes = item.notes.trim()
                 )
             }
+
+            repository.saveReceivingSession(session, entities).fold(
+                onSuccess = {
+                    lastMediaUri = null
+                    lastRawOcrText = ""
+                    _formState.value = ReceivingFormState(responsibleName = defaultResponsible)
+                    _extractionState.value = ExtractionUiState.Success(
+                        "Recebimento salvo! ${entities.size} lote(s) entraram na câmara fria."
+                    )
+                },
+                onFailure = { err ->
+                    _formState.update { it.copy(isSaving = false) }
+                    _extractionState.value = ExtractionUiState.Error(
+                        friendlyFirestoreMessage(err, "Erro ao salvar recebimento na nuvem.")
+                    )
+                }
+            )
         }
     }
 
     fun resetForm() {
         lastMediaUri = null
+        lastRawOcrText = ""
         _formState.value = ReceivingFormState()
         _extractionState.value = ExtractionUiState.Idle
     }
 
-    fun deleteSession(sessionId: Long) {
+    fun deleteSession(sessionId: String) {
         viewModelScope.launch {
-            repository.deleteSession(sessionId)
+            repository.deleteSession(sessionId).fold(
+                onSuccess = {
+                    _extractionState.value = ExtractionUiState.Success("Sessão removida do histórico.")
+                },
+                onFailure = { err ->
+                    _extractionState.value = ExtractionUiState.Error(
+                        friendlyFirestoreMessage(err, "Apenas o gerente pode excluir sessões.")
+                    )
+                }
+            )
         }
     }
 
     private fun checkThermalConsistency(items: List<ParsedInvoiceItemDraft>, sessionTemp: Double?, targetZone: TemperatureZone): String? {
-        val sessionCompliance = sessionTemp?.let { ThermalCompliance.evaluate(targetZone, it) }
-        if (sessionCompliance == ThermalCompliance.CRITICO) {
-            return "⚠️ ALERTA CRÍTICO: Temperatura de chegada (${DateUtils.formatTemp(sessionTemp!!)}) fora do padrão para ${targetZone.displayName}!"
+        if (sessionTemp != null) {
+            val sessionCompliance = ThermalCompliance.evaluate(targetZone, sessionTemp)
+            if (sessionCompliance == ThermalCompliance.CRITICO) {
+                return "⚠️ ALERTA CRÍTICO: Temperatura de chegada (${DateUtils.formatTemp(sessionTemp)}) fora do padrão para ${targetZone.displayName}!"
+            }
         }
         val criticalItems = items.filter { ThermalCompliance.evaluate(it.temperatureZone, it.measuredTempCelsius) == ThermalCompliance.CRITICO }
         if (criticalItems.isNotEmpty()) {
@@ -447,7 +649,7 @@ class ReceivingViewModel(
         if (warningItems.isNotEmpty()) {
             return "⚠️ Nota: ${warningItems.size} lote(s) com temperatura em faixa de atenção."
         }
-        if (sessionCompliance == ThermalCompliance.ATENCAO) {
+        if (sessionTemp != null && ThermalCompliance.evaluate(targetZone, sessionTemp) == ThermalCompliance.ATENCAO) {
             return "⚠️ Nota: Temperatura de chegada em faixa de atenção."
         }
         return null
@@ -466,6 +668,23 @@ class ReceivingViewModel(
         return if (consistencyWarning != null) "$base\n$consistencyWarning" else base
     }
 
+    private fun buildFastAiSuccessMessage(
+        draft: ParsedInvoiceDraft,
+        elapsedLabel: String,
+        consistencyWarning: String?
+    ): String {
+        val parts = mutableListOf<String>()
+        if (draft.invoiceNumber.isNotBlank()) parts.add("NF ${draft.invoiceNumber}")
+        parts.add("${draft.items.size} produto(s)")
+        val base = "IA Rápida ($elapsedLabel): ${parts.joinToString(", ")} extraído(s). Revise antes de salvar."
+        return if (consistencyWarning != null) "$base\n$consistencyWarning" else base
+    }
+
+    private fun formatElapsedSeconds(startedAtMillis: Long): String {
+        val sec = ((System.currentTimeMillis() - startedAtMillis).coerceAtLeast(100L)) / 1000.0
+        return String.format(Locale.US, "%.1fs", sec)
+    }
+
     private fun applyParsedDraft(draft: ParsedInvoiceDraft, replaceItems: Boolean) {
         _formState.update { current ->
             val inferredZone = draft.items.firstOrNull()?.temperatureZone ?: current.targetZone
@@ -475,7 +694,7 @@ class ReceivingViewModel(
 
             val effectiveSessionTemp = when {
                 draft.extractedTempCelsius != null -> draft.extractedTempCelsius
-                userCustomizedTemp && inferredZone == current.targetZone -> currentSessionTemp!!
+                userCustomizedTemp && currentSessionTemp != null && inferredZone == current.targetZone -> currentSessionTemp
                 inferredZone != current.targetZone -> inferredZone.defaultTempCelsius
                 else -> currentSessionTemp ?: inferredZone.defaultTempCelsius
             }

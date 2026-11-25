@@ -19,6 +19,8 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
@@ -27,29 +29,44 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 private const val TAG = "InvoiceLocalExtractor"
-private const val MAX_IMAGE_DIMENSION = 2000
-private const val MAX_PDF_PAGES = 5
-private const val PDF_TARGET_WIDTH_PX = 1800
+private const val MAX_IMAGE_DIMENSION = 1600
+private const val MAX_PDF_PAGES = 4
+private const val PDF_TARGET_WIDTH_PX = 1440
+
+data class LocalOcrSnapshot(
+    val pages: List<OcrPageInput>,
+    val reconstructedText: String,
+    val scannedBarcodes: List<String>
+) {
+    val lineCount: Int get() = pages.sumOf { it.lines.size }
+}
 
 class InvoiceLocalExtractor {
 
-    suspend fun extractFromImageUri(context: Context, imageUri: Uri): Result<ParsedInvoiceDraft> {
+    suspend fun extractSnapshotFromImageUri(context: Context, imageUri: Uri): Result<LocalOcrSnapshot> {
         return try {
             val bitmap = withContext(Dispatchers.IO) {
                 decodeOrientedBitmap(context, imageUri, MAX_IMAGE_DIMENSION)
             } ?: return Result.failure(IllegalArgumentException("Não foi possível abrir a imagem selecionada."))
 
             val page = try {
-                runOcrAndBarcodeOnBitmap(bitmap)
+                val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                val scanner = BarcodeScanning.getClient()
+                try {
+                    runOcrAndBarcodeOnBitmap(bitmap, recognizer, scanner)
+                } finally {
+                    recognizer.close()
+                    scanner.close()
+                }
             } finally {
                 bitmap.recycle()
             }
 
-            LocalInvoiceOcrParser.parsePages(listOf(page), InvoiceSourceType.OCR_FOTO)
+            Result.success(buildSnapshot(listOf(page)))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Local OCR image extraction failed", e)
+            Log.e(TAG, "Local OCR image snapshot failed", e)
             Result.failure(
                 IllegalStateException(
                     "Falha na leitura local da foto: ${e.localizedMessage ?: "verifique a nitidez da imagem"}"
@@ -58,7 +75,7 @@ class InvoiceLocalExtractor {
         }
     }
 
-    suspend fun extractFromPdfUri(context: Context, pdfUri: Uri): Result<ParsedInvoiceDraft> {
+    suspend fun extractSnapshotFromPdfUri(context: Context, pdfUri: Uri): Result<LocalOcrSnapshot> {
         return try {
             val pages = withContext(Dispatchers.IO) {
                 renderPdfPagesAndRecognize(context, pdfUri)
@@ -66,17 +83,45 @@ class InvoiceLocalExtractor {
             if (pages.isEmpty()) {
                 return Result.failure(IllegalArgumentException("O arquivo PDF não possui páginas legíveis."))
             }
-            LocalInvoiceOcrParser.parsePages(pages, InvoiceSourceType.OCR_PDF)
+            Result.success(buildSnapshot(pages))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Local OCR PDF extraction failed", e)
+            Log.e(TAG, "Local OCR PDF snapshot failed", e)
             Result.failure(
                 IllegalStateException(
                     "Falha na leitura local do PDF: ${e.localizedMessage ?: "arquivo protegido ou corrompido"}"
                 )
             )
         }
+    }
+
+    suspend fun extractFromImageUri(context: Context, imageUri: Uri): Result<ParsedInvoiceDraft> {
+        val snapshot = extractSnapshotFromImageUri(context, imageUri).getOrElse { return Result.failure(it) }
+        return LocalInvoiceOcrParser.parsePages(snapshot.pages, InvoiceSourceType.OCR_FOTO)
+    }
+
+    suspend fun extractFromPdfUri(context: Context, pdfUri: Uri): Result<ParsedInvoiceDraft> {
+        val snapshot = extractSnapshotFromPdfUri(context, pdfUri).getOrElse { return Result.failure(it) }
+        return LocalInvoiceOcrParser.parsePages(snapshot.pages, InvoiceSourceType.OCR_PDF)
+    }
+
+    private fun buildSnapshot(pages: List<OcrPageInput>): LocalOcrSnapshot {
+        val reconstructedRows = pages.flatMap { LocalInvoiceOcrParser.reconstructRows(it.lines) }
+        val barcodes = pages.flatMap { it.scannedBarcodes }.distinct()
+        val combinedText = buildString {
+            append(reconstructedRows.joinToString("\n"))
+            if (barcodes.isNotEmpty()) {
+                if (isNotEmpty()) append("\n")
+                append("CODIGOS DETECTADOS: ")
+                append(barcodes.joinToString(" | "))
+            }
+        }.trim()
+        return LocalOcrSnapshot(
+            pages = pages,
+            reconstructedText = combinedText,
+            scannedBarcodes = barcodes
+        )
     }
 
     private suspend fun renderPdfPagesAndRecognize(
@@ -86,64 +131,75 @@ class InvoiceLocalExtractor {
         val pfd = context.contentResolver.openFileDescriptor(pdfUri, "r")
             ?: throw IllegalArgumentException("Não foi possível abrir o arquivo PDF selecionado.")
 
+        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        val scanner = BarcodeScanning.getClient()
         val recognizedPages = mutableListOf<OcrPageInput>()
-        pfd.use { descriptor ->
-            PdfRenderer(descriptor).use { renderer ->
-                val pageCount = minOf(renderer.pageCount, MAX_PDF_PAGES)
-                for (pageIndex in 0 until pageCount) {
-                    val bitmap = renderer.openPage(pageIndex).use { page ->
-                        val scale = (PDF_TARGET_WIDTH_PX.toFloat() / max(page.width, 1)).coerceIn(1.5f, 3.0f)
-                        val width = (page.width * scale).roundToInt().coerceAtLeast(1)
-                        val height = (page.height * scale).roundToInt().coerceAtLeast(1)
-                        Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bmp ->
-                            Canvas(bmp).drawColor(Color.WHITE)
-                            page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+        try {
+            pfd.use { descriptor ->
+                PdfRenderer(descriptor).use { renderer ->
+                    val pageCount = minOf(renderer.pageCount, MAX_PDF_PAGES)
+                    for (pageIndex in 0 until pageCount) {
+                        val bitmap = renderer.openPage(pageIndex).use { page ->
+                            val scale = (PDF_TARGET_WIDTH_PX.toFloat() / max(page.width, 1)).coerceIn(1.2f, 2.5f)
+                            val width = (page.width * scale).roundToInt().coerceAtLeast(1)
+                            val height = (page.height * scale).roundToInt().coerceAtLeast(1)
+                            Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565).also { bmp ->
+                                Canvas(bmp).drawColor(Color.WHITE)
+                                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            }
                         }
-                    }
-                    try {
-                        recognizedPages.add(runOcrAndBarcodeOnBitmap(bitmap))
-                    } finally {
-                        bitmap.recycle()
+                        val pageInput = try {
+                            runOcrAndBarcodeOnBitmap(bitmap, recognizer, scanner)
+                        } finally {
+                            bitmap.recycle()
+                        }
+                        if (pageInput.lines.isNotEmpty() || pageInput.scannedBarcodes.isNotEmpty() || pageIndex == 0) {
+                            recognizedPages.add(pageInput)
+                        }
                     }
                 }
             }
+        } finally {
+            recognizer.close()
+            scanner.close()
         }
         return recognizedPages
     }
 
-    private suspend fun runOcrAndBarcodeOnBitmap(bitmap: Bitmap): OcrPageInput {
+    private suspend fun runOcrAndBarcodeOnBitmap(
+        bitmap: Bitmap,
+        recognizer: com.google.mlkit.vision.text.TextRecognizer,
+        scanner: com.google.mlkit.vision.barcode.BarcodeScanner
+    ): OcrPageInput = coroutineScope {
         val image = InputImage.fromBitmap(bitmap, 0)
-        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-        val scanner = BarcodeScanning.getClient()
-
-        return try {
-            val visionText = recognizer.process(image).awaitResult()
-            val barcodes = try {
+        val textDeferred = async { recognizer.process(image).awaitResult() }
+        val barcodeDeferred = async {
+            try {
                 scanner.process(image).awaitResult()
             } catch (e: Exception) {
                 Log.w(TAG, "Barcode detection skipped on OCR frame", e)
                 emptyList<Barcode>()
             }
-
-            val lines = visionText.textBlocks.flatMap { block ->
-                block.lines.map { line ->
-                    val rect = line.boundingBox
-                    OcrLineBox(
-                        text = line.text,
-                        left = rect?.left?.toFloat() ?: 0f,
-                        top = rect?.top?.toFloat() ?: 0f,
-                        right = rect?.right?.toFloat() ?: 0f,
-                        bottom = rect?.bottom?.toFloat() ?: 0f
-                    )
-                }
-            }
-
-            val rawCodes = barcodes.mapNotNull { it.rawValue?.takeIf { raw -> raw.isNotBlank() } }
-            OcrPageInput(lines = lines, scannedBarcodes = rawCodes)
-        } finally {
-            recognizer.close()
-            scanner.close()
         }
+
+        val visionText = textDeferred.await()
+        val barcodes = barcodeDeferred.await()
+
+        val lines = visionText.textBlocks.flatMap { block ->
+            block.lines.map { line ->
+                val rect = line.boundingBox
+                OcrLineBox(
+                    text = line.text,
+                    left = rect?.left?.toFloat() ?: 0f,
+                    top = rect?.top?.toFloat() ?: 0f,
+                    right = rect?.right?.toFloat() ?: 0f,
+                    bottom = rect?.bottom?.toFloat() ?: 0f
+                )
+            }
+        }
+
+        val rawCodes = barcodes.mapNotNull { it.rawValue?.takeIf { raw -> raw.isNotBlank() } }
+        OcrPageInput(lines = lines, scannedBarcodes = rawCodes)
     }
 
     private fun decodeOrientedBitmap(context: Context, uri: Uri, maxDimension: Int): Bitmap? {
@@ -166,7 +222,10 @@ class InvoiceLocalExtractor {
             sampleSize *= 2
         }
 
-        val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.RGB_565
+        }
         val decoded = context.contentResolver.openInputStream(uri)?.use { stream ->
             BitmapFactory.decodeStream(stream, null, decodeOptions)
         } ?: return null

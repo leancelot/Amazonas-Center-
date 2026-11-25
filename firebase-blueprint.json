@@ -1,0 +1,189 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated collaborator profile and active shop pointer.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID matching document ID." },
+        "email": { "type": "string", "description": "Verified Google account email." },
+        "displayName": { "type": "string", "description": "Collaborator display name." },
+        "activeShopId": { "type": "string", "description": "Active butcher shop workspace ID." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": ["userId", "email", "displayName", "activeShopId", "createdAt", "updatedAt"]
+    },
+    "Shop": {
+      "title": "Shop",
+      "description": "Butcher shop cold-storage workspace.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Shop display name." },
+        "ownerId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "memberUids": { "type": "array", "description": "Active member UIDs (max 30)." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": ["name", "ownerId", "memberUids", "createdAt", "updatedAt"]
+    },
+    "ShopMember": {
+      "title": "ShopMember",
+      "description": "Collaborator membership and role-based access control record.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Member Firebase Auth UID." },
+        "shopId": { "type": "string", "description": "Parent shop ID." },
+        "shopOwnerId": { "type": "string", "description": "Shop owner UID for fast listing." },
+        "managerUids": { "type": "array", "description": "Manager UIDs allowed to list members." },
+        "email": { "type": "string", "description": "Collaborator email." },
+        "displayName": { "type": "string", "description": "Collaborator name." },
+        "role": { "type": "string", "enum": ["GERENTE", "CONFERENTE", "CAMARA_FRIA", "OPERADOR"] },
+        "active": { "type": "boolean", "description": "Whether member access is active." },
+        "inviteId": { "type": "string", "description": "Optional invite ID used during onboarding." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": ["userId", "shopId", "shopOwnerId", "managerUids", "email", "displayName", "role", "active", "createdAt", "updatedAt"]
+    },
+    "TeamInvite": {
+      "title": "TeamInvite",
+      "description": "Manager-issued invitation assigning a role to a collaborator Google email.",
+      "type": "object",
+      "properties": {
+        "shopId": { "type": "string", "description": "Target shop ID." },
+        "shopName": { "type": "string", "description": "Target shop display name." },
+        "emailLower": { "type": "string", "description": "Lowercase Google email of invited collaborator." },
+        "assignedRole": { "type": "string", "enum": ["GERENTE", "CONFERENTE", "CAMARA_FRIA", "OPERADOR"] },
+        "invitedByUid": { "type": "string", "description": "Manager UID who created invite." },
+        "status": { "type": "string", "enum": ["PENDING", "ACCEPTED", "REVOKED"] },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": ["shopId", "shopName", "emailLower", "assignedRole", "invitedByUid", "status", "createdAt", "updatedAt"]
+    },
+    "ReceivingSession": {
+      "title": "ReceivingSession",
+      "description": "Invoice / delivery receiving session header.",
+      "type": "object",
+      "properties": {
+        "shopId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "createdByUid": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "accessKey": { "type": "string" },
+        "supplierName": { "type": "string" },
+        "supplierCnpj": { "type": "string" },
+        "receivedAtMillis": { "type": "integer" },
+        "measuredTempCelsius": { "type": "number" },
+        "targetZone": { "type": "string", "enum": ["RESFRIADO", "CONGELADO", "MATURACAO"] },
+        "thermalStatus": { "type": "string", "enum": ["CONFORME", "ATENCAO", "CRITICO"] },
+        "responsibleName": { "type": "string" },
+        "sourceType": { "type": "string", "enum": ["MANUAL", "XML_NFE", "OCR_FOTO", "OCR_PDF", "IA_FOTO", "IA_PDF", "QR_DANFE"] },
+        "notes": { "type": "string" },
+        "itemCount": { "type": "integer" },
+        "totalKg": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "shopId", "memberUids", "createdByUid", "invoiceNumber", "accessKey",
+        "supplierName", "supplierCnpj", "receivedAtMillis", "measuredTempCelsius",
+        "targetZone", "thermalStatus", "responsibleName", "sourceType", "notes",
+        "itemCount", "totalKg", "createdAt", "updatedAt"
+      ]
+    },
+    "ColdStorageItem": {
+      "title": "ColdStorageItem",
+      "description": "Cold-storage meat batch tracked by FEFO expiry.",
+      "type": "object",
+      "properties": {
+        "shopId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "createdByUid": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "meatType": { "type": "string", "enum": ["BOVINA", "SUINA", "AVES", "OVINA", "PEIXES", "EMBUTIDOS_OUTROS"] },
+        "cutName": { "type": "string" },
+        "temperatureZone": { "type": "string", "enum": ["RESFRIADO", "CONGELADO", "MATURACAO"] },
+        "measuredTempCelsius": { "type": "number" },
+        "chamberName": { "type": "string" },
+        "batchCode": { "type": "string" },
+        "sifCode": { "type": "string" },
+        "initialQuantity": { "type": "number" },
+        "currentQuantity": { "type": "number" },
+        "unit": { "type": "string", "enum": ["KG", "PECA", "CAIXA"] },
+        "unitCostBrl": { "type": "number" },
+        "expiryDateEpochDay": { "type": "integer" },
+        "receivedAtMillis": { "type": "integer" },
+        "supplierName": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "shopId", "memberUids", "createdByUid", "sessionId", "meatType", "cutName",
+        "temperatureZone", "measuredTempCelsius", "chamberName", "batchCode", "sifCode",
+        "initialQuantity", "currentQuantity", "unit", "unitCostBrl", "expiryDateEpochDay",
+        "receivedAtMillis", "supplierName", "invoiceNumber", "notes", "createdAt", "updatedAt"
+      ]
+    },
+    "StockMovement": {
+      "title": "StockMovement",
+      "description": "Immutable audit trail of stock entries, counter exits, and losses.",
+      "type": "object",
+      "properties": {
+        "shopId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "createdByUid": { "type": "string" },
+        "createdByName": { "type": "string" },
+        "itemId": { "type": "string" },
+        "cutNameSnapshot": { "type": "string" },
+        "meatTypeSnapshot": { "type": "string" },
+        "unitSnapshot": { "type": "string" },
+        "movementType": { "type": "string", "enum": ["ENTRADA", "SAIDA_BALCAO", "SAIDA_DESOSSA", "PERDA_VENCIMENTO", "PERDA_APARA", "PERDA_TEMPERATURA", "AJUSTE"] },
+        "quantity": { "type": "number" },
+        "estimatedLossBrl": { "type": "number" },
+        "reason": { "type": "string" },
+        "createdAtMillis": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "shopId", "memberUids", "createdByUid", "createdByName", "itemId",
+        "cutNameSnapshot", "meatTypeSnapshot", "unitSnapshot", "movementType",
+        "quantity", "estimatedLossBrl", "reason", "createdAtMillis", "createdAt", "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Owner-isolated user profiles."
+    },
+    "/shops/{shopId}": {
+      "schema": { "$ref": "#/entities/Shop" },
+      "description": "Butcher shop workspaces."
+    },
+    "/shops/{shopId}/members/{memberUid}": {
+      "schema": { "$ref": "#/entities/ShopMember" },
+      "description": "Role-based access memberships per shop."
+    },
+    "/invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/TeamInvite" },
+      "description": "Role invitations by verified Google email."
+    },
+    "/shops/{shopId}/receiving_sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/ReceivingSession" },
+      "description": "Receiving sessions belonging to a shop."
+    },
+    "/shops/{shopId}/cold_storage_items/{itemId}": {
+      "schema": { "$ref": "#/entities/ColdStorageItem" },
+      "description": "Cold storage lots belonging to a shop."
+    },
+    "/shops/{shopId}/stock_movements/{movementId}": {
+      "schema": { "$ref": "#/entities/StockMovement" },
+      "description": "Stock movements belonging to a shop."
+    }
+  }
+}

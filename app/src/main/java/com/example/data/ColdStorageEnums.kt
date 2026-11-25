@@ -226,3 +226,53 @@ enum class ExpiryUrgency(val label: String, val priority: Int) {
         }
     }
 }
+
+enum class StaffRole(
+    val displayName: String,
+    val description: String,
+    val canReceive: Boolean,
+    val canEditReceivingOrStock: Boolean,
+    val canDeleteRecords: Boolean,
+    val canManageTeam: Boolean
+) {
+    GERENTE(
+        displayName = "Gerente",
+        description = "Acesso total: recebimentos, edição de estoque, baixas, exclusões e equipe.",
+        canReceive = true,
+        canEditReceivingOrStock = true,
+        canDeleteRecords = true,
+        canManageTeam = true
+    ),
+    CONFERENTE(
+        displayName = "Conferente",
+        description = "Registra recebimentos e pode editar recebimentos, lotes e baixas no estoque.",
+        canReceive = true,
+        canEditReceivingOrStock = true,
+        canDeleteRecords = false,
+        canManageTeam = false
+    ),
+    CAMARA_FRIA(
+        displayName = "Resp. Câmara Fria",
+        description = "Edita estoque (Resfriado/Congelado, °C, validade), baixas e recebimentos.",
+        canReceive = true,
+        canEditReceivingOrStock = true,
+        canDeleteRecords = false,
+        canManageTeam = false
+    ),
+    OPERADOR(
+        displayName = "Operador / Portaria",
+        description = "Consulta o estoque e registra a entrada inicial de mercadorias.",
+        canReceive = true,
+        canEditReceivingOrStock = false,
+        canDeleteRecords = false,
+        canManageTeam = false
+    );
+
+    companion object {
+        fun fromRaw(raw: String?): StaffRole {
+            return entries.firstOrNull { it.name.equals(raw?.trim(), ignoreCase = true) }
+                ?: OPERADOR
+        }
+    }
+}
+

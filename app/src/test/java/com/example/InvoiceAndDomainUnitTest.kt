@@ -1,6 +1,5 @@
 package com.example
 
-import com.example.data.ColdStorageDao
 import com.example.data.ColdStorageItemEntity
 import com.example.data.ColdStorageRepository
 import com.example.data.DateUtils
@@ -11,7 +10,12 @@ import com.example.data.MeasurementUnit
 import com.example.data.MovementType
 import com.example.data.ReceivingSessionEntity
 import com.example.data.ReceivingSessionSummary
+import com.example.data.ShopInfo
+import com.example.data.ShopMember
+import com.example.data.ShopSessionState
+import com.example.data.StaffRole
 import com.example.data.StockMovementEntity
+import com.example.data.TeamInvite
 import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
 import com.example.domain.invoice.DanfeQrParser
@@ -26,6 +30,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -165,9 +170,31 @@ class InvoiceAndDomainUnitTest {
     }
 
     @Test
+    fun `staff roles enforce permissions for gerente, conferente, camara fria, and operador`() {
+        assertTrue(StaffRole.GERENTE.canReceive)
+        assertTrue(StaffRole.GERENTE.canEditReceivingOrStock)
+        assertTrue(StaffRole.GERENTE.canDeleteRecords)
+        assertTrue(StaffRole.GERENTE.canManageTeam)
+
+        assertTrue(StaffRole.CONFERENTE.canReceive)
+        assertTrue(StaffRole.CONFERENTE.canEditReceivingOrStock)
+        assertFalse(StaffRole.CONFERENTE.canDeleteRecords)
+        assertFalse(StaffRole.CONFERENTE.canManageTeam)
+
+        assertTrue(StaffRole.CAMARA_FRIA.canReceive)
+        assertTrue(StaffRole.CAMARA_FRIA.canEditReceivingOrStock)
+        assertFalse(StaffRole.CAMARA_FRIA.canDeleteRecords)
+        assertFalse(StaffRole.CAMARA_FRIA.canManageTeam)
+
+        assertTrue(StaffRole.OPERADOR.canReceive)
+        assertFalse(StaffRole.OPERADOR.canEditReceivingOrStock)
+        assertFalse(StaffRole.OPERADOR.canDeleteRecords)
+        assertFalse(StaffRole.OPERADOR.canManageTeam)
+    }
+
+    @Test
     fun `repository saves receiving session and processes atomic stock out and loss`() = runTest {
-        val fakeDao = FakeColdStorageDao()
-        val repository = ColdStorageRepository(fakeDao)
+        val repository: ColdStorageRepository = FakeColdStorageRepository()
 
         val session = ReceivingSessionEntity(
             invoiceNumber = "5501",
@@ -178,7 +205,7 @@ class InvoiceAndDomainUnitTest {
             sourceType = InvoiceSourceType.MANUAL.name
         )
 
-        repository.saveReceivingSession(
+        val saveResult = repository.saveReceivingSession(
             session = session,
             items = listOf(
                 ColdStorageItemEntity(
@@ -207,14 +234,15 @@ class InvoiceAndDomainUnitTest {
                 )
             )
         )
+        assertTrue(saveResult.isSuccess)
 
         val fefoItems = repository.activeItemsFefo.first()
         assertEquals(2, fefoItems.size)
         assertEquals("Contrafilé", fefoItems[0].cutName)
 
         val itemId = fefoItems[0].id
-        assertTrue(repository.recordStockOut(itemId, MovementType.SAIDA_BALCAO, 10.0, "Balcão"))
-        assertTrue(repository.recordStockOut(itemId, MovementType.PERDA_APARA, 2.0, "Apara"))
+        assertTrue(repository.recordStockOut(itemId, MovementType.SAIDA_BALCAO, 10.0, "Balcão").getOrThrow())
+        assertTrue(repository.recordStockOut(itemId, MovementType.PERDA_APARA, 2.0, "Apara").getOrThrow())
 
         val updated = repository.activeItemsFefo.first().first { it.id == itemId }
         assertEquals(3.0, updated.currentQuantity, 0.01)
@@ -225,93 +253,179 @@ class InvoiceAndDomainUnitTest {
         assertEquals(100.0, loss.estimatedLossBrl, 0.01)
     }
 
-    private class FakeColdStorageDao : ColdStorageDao {
-        private var nextSessionId = 1L
-        private var nextItemId = 1L
-        private var nextMovementId = 1L
+    @Test
+    fun `receiving viewmodel manages truck dock queue park, resume, and remove cleanly`() {
+        val repository = FakeColdStorageRepository()
+        val viewModel = ReceivingViewModel(
+            repository = repository,
+            localExtractor = com.example.domain.invoice.InvoiceLocalExtractor(),
+            aiExtractor = com.example.domain.invoice.InvoiceAiExtractor()
+        )
+
+        viewModel.addQuickEntryItem(
+            supplier = "Frigorífico A",
+            invoiceNum = "1001",
+            responsible = "Leandro",
+            meatType = MeatType.BOVINA,
+            cutName = "Picanha",
+            zone = TemperatureZone.RESFRIADO,
+            tempCelsius = 2.0,
+            quantity = 18.5,
+            unit = MeasurementUnit.KG,
+            batch = "L01",
+            expiryEpochDay = DateUtils.addDaysToTodayEpochDay(7)
+        )
+        assertTrue(viewModel.parkCurrentEntryInQueue())
+        assertEquals(1, viewModel.pendingQueue.value.size)
+        assertTrue(viewModel.formState.value.items.isEmpty())
+        assertEquals("Leandro", viewModel.formState.value.responsibleName)
+
+        viewModel.addQuickEntryItem(
+            supplier = "Frigorífico B",
+            invoiceNum = "1002",
+            responsible = "Leandro",
+            meatType = MeatType.AVES,
+            cutName = "Peito de Frango",
+            zone = TemperatureZone.CONGELADO,
+            tempCelsius = -18.0,
+            quantity = 30.0,
+            unit = MeasurementUnit.CAIXA,
+            batch = "L02",
+            expiryEpochDay = DateUtils.addDaysToTodayEpochDay(90)
+        )
+
+        val parkedId = viewModel.pendingQueue.value.first().id
+        viewModel.resumeParkedEntry(parkedId)
+
+        assertEquals("1001", viewModel.formState.value.invoiceNumber)
+        assertEquals("Picanha", viewModel.formState.value.items.first().cutName)
+        // Active entry 1002 should have been swapped into queue cleanly
+        assertEquals(1, viewModel.pendingQueue.value.size)
+        assertEquals("1002", viewModel.pendingQueue.value.first().form.invoiceNumber)
+
+        viewModel.removeParkedEntry(viewModel.pendingQueue.value.first().id)
+        assertTrue(viewModel.pendingQueue.value.isEmpty())
+    }
+
+    private class FakeColdStorageRepository : ColdStorageRepository {
+        private var nextSessionId = 1
+        private var nextItemId = 1
+        private var nextMovementId = 1
 
         private val sessions = MutableStateFlow<List<ReceivingSessionEntity>>(emptyList())
         private val items = MutableStateFlow<List<ColdStorageItemEntity>>(emptyList())
         private val movements = MutableStateFlow<List<StockMovementEntity>>(emptyList())
 
-        override fun observeActiveItemsFefo(): Flow<List<ColdStorageItemEntity>> =
-            items.map { list ->
-                list.filter { it.currentQuantity > 0.001 }
-                    .sortedWith(compareBy<ColdStorageItemEntity> { it.expiryDateEpochDay }.thenBy { it.receivedAtMillis })
-            }
+        override val sessionState: Flow<ShopSessionState> = MutableStateFlow(
+            ShopSessionState(
+                isLoading = false,
+                shopInfo = ShopInfo(id = "amazonas_center", name = "Amazonas Center", ownerId = "owner"),
+                currentMember = ShopMember(
+                    id = "owner",
+                    userId = "owner",
+                    shopId = "amazonas_center",
+                    displayName = "Leandro",
+                    role = StaffRole.GERENTE.name,
+                    active = true
+                )
+            )
+        )
 
-        override fun observeAllItems(): Flow<List<ColdStorageItemEntity>> = items
+        override val activeItemsFefo: Flow<List<ColdStorageItemEntity>> = items.map { list ->
+            list.filter { it.currentQuantity > 0.001 }
+                .sortedWith(compareBy<ColdStorageItemEntity> { it.expiryDateEpochDay }.thenBy { it.receivedAtMillis })
+        }
 
-        override suspend fun getItemById(itemId: Long): ColdStorageItemEntity? =
-            items.value.firstOrNull { it.id == itemId }
+        override val allItems: Flow<List<ColdStorageItemEntity>> = items
 
-        override fun observeSessionSummaries(): Flow<List<ReceivingSessionSummary>> =
-            sessions.map { emptyList() }
+        override val sessionSummaries: Flow<List<ReceivingSessionSummary>> = sessions.map { emptyList() }
 
-        override fun observeItemsForSession(sessionId: Long): Flow<List<ColdStorageItemEntity>> =
+        override val allMovements: Flow<List<StockMovementEntity>> = movements
+
+        override val teamMembers: Flow<List<ShopMember>> = MutableStateFlow(emptyList())
+
+        override val teamInvites: Flow<List<TeamInvite>> = MutableStateFlow(emptyList())
+
+        override fun observeItemsForSession(sessionId: String): Flow<List<ColdStorageItemEntity>> =
             items.map { list -> list.filter { it.sessionId == sessionId } }
 
-        override fun observeAllMovements(): Flow<List<StockMovementEntity>> = movements
-
-        override fun observeMovementsForItem(itemId: Long): Flow<List<StockMovementEntity>> =
+        override fun observeMovementsForItem(itemId: String): Flow<List<StockMovementEntity>> =
             movements.map { list -> list.filter { it.itemId == itemId } }
 
-        override suspend fun insertSession(session: ReceivingSessionEntity): Long {
-            val id = nextSessionId++
-            sessions.value = sessions.value + session.copy(id = id)
-            return id
-        }
+        override suspend fun ensureSessionReady(): Result<Unit> = Result.success(Unit)
 
-        override suspend fun insertItem(item: ColdStorageItemEntity): Long {
-            val id = nextItemId++
-            items.value = items.value + item.copy(id = id)
-            return id
-        }
-
-        override suspend fun insertItems(items: List<ColdStorageItemEntity>): List<Long> =
-            items.map { insertItem(it) }
-
-        override suspend fun insertMovement(movement: StockMovementEntity): Long {
-            val id = nextMovementId++
-            movements.value = movements.value + movement.copy(id = id)
-            return id
-        }
-
-        override suspend fun insertMovements(movements: List<StockMovementEntity>) {
-            movements.forEach { insertMovement(it) }
-        }
-
-        override suspend fun updateItemQuantity(itemId: Long, newQuantity: Double) {
-            items.value = items.value.map {
-                if (it.id == itemId) it.copy(currentQuantity = newQuantity) else it
+        override suspend fun saveReceivingSession(
+            session: ReceivingSessionEntity,
+            items: List<ColdStorageItemEntity>
+        ): Result<String> {
+            val sessionId = "s_${nextSessionId++}"
+            sessions.value = sessions.value + session.copy(id = sessionId)
+            val savedItems = items.map { it.copy(id = "i_${nextItemId++}", sessionId = sessionId) }
+            this.items.value = this.items.value + savedItems
+            val entryMovements = savedItems.map { item ->
+                StockMovementEntity(
+                    id = "m_${nextMovementId++}",
+                    itemId = item.id,
+                    cutNameSnapshot = item.cutName,
+                    meatTypeSnapshot = item.meatType,
+                    unitSnapshot = item.unit,
+                    movementType = MovementType.ENTRADA.name,
+                    quantity = item.initialQuantity,
+                    createdAtMillis = session.receivedAtMillis
+                )
             }
+            movements.value = movements.value + entryMovements
+            return Result.success(sessionId)
         }
 
-        override suspend fun updateItemChamberAndTemp(
-            itemId: Long,
+        override suspend fun recordStockOut(
+            itemId: String,
+            movementType: MovementType,
+            quantity: Double,
+            reason: String
+        ): Result<Boolean> {
+            val item = items.value.firstOrNull { it.id == itemId } ?: return Result.success(false)
+            val deduct = quantity.coerceIn(0.0, item.currentQuantity)
+            if (deduct <= 0.0) return Result.success(false)
+            val remaining = (item.currentQuantity - deduct).let { if (it < 0.001) 0.0 else it }
+            items.value = items.value.map {
+                if (it.id == itemId) it.copy(currentQuantity = remaining) else it
+            }
+            val loss = if (movementType.isLoss) deduct * item.unitCostBrl else 0.0
+            movements.value = movements.value + StockMovementEntity(
+                id = "m_${nextMovementId++}",
+                itemId = itemId,
+                cutNameSnapshot = item.cutName,
+                meatTypeSnapshot = item.meatType,
+                unitSnapshot = item.unit,
+                movementType = movementType.name,
+                quantity = deduct,
+                estimatedLossBrl = loss,
+                reason = reason
+            )
+            return Result.success(true)
+        }
+
+        override suspend fun transferChamber(
+            itemId: String,
             chamberName: String,
-            temperatureZone: String,
+            zone: TemperatureZone,
             tempCelsius: Double
-        ) {
-            items.value = items.value.map {
-                if (it.id == itemId) {
-                    it.copy(chamberName = chamberName, temperatureZone = temperatureZone, measuredTempCelsius = tempCelsius)
-                } else it
-            }
-        }
+        ): Result<Unit> = Result.success(Unit)
 
-        override suspend fun updateItemExpiry(itemId: Long, expiryEpochDay: Long) {
-            items.value = items.value.map {
-                if (it.id == itemId) it.copy(expiryDateEpochDay = expiryEpochDay) else it
-            }
-        }
+        override suspend fun updateExpiry(itemId: String, expiryEpochDay: Long): Result<Unit> =
+            Result.success(Unit)
 
-        override suspend fun deleteItemById(itemId: Long) {
-            items.value = items.value.filterNot { it.id == itemId }
-        }
+        override suspend fun deleteItem(itemId: String): Result<Unit> = Result.success(Unit)
 
-        override suspend fun deleteSessionById(sessionId: Long) {
-            sessions.value = sessions.value.filterNot { it.id == sessionId }
-        }
+        override suspend fun deleteSession(sessionId: String): Result<Unit> = Result.success(Unit)
+
+        override suspend fun inviteCollaborator(email: String, role: StaffRole): Result<Unit> =
+            Result.success(Unit)
+
+        override suspend fun updateMemberRole(memberUid: String, newRole: StaffRole, active: Boolean): Result<Unit> =
+            Result.success(Unit)
+
+        override suspend fun revokeInvite(inviteId: String): Result<Unit> = Result.success(Unit)
     }
 }

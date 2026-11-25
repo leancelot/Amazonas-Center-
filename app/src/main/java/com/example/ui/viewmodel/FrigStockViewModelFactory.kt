@@ -22,6 +22,8 @@ class FrigStockViewModelFactory(
                 InventoryViewModel(repository) as T
             modelClass.isAssignableFrom(ReportsViewModel::class.java) ->
                 ReportsViewModel(repository) as T
+            modelClass.isAssignableFrom(TeamViewModel::class.java) ->
+                TeamViewModel(repository) as T
             else -> throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
         }
     }

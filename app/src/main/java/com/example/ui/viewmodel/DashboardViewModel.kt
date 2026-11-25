@@ -1,5 +1,6 @@
 package com.example.ui.viewmodel
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ColdStorageItemEntity
@@ -8,10 +9,13 @@ import com.example.data.ExpiryUrgency
 import com.example.data.MeasurementUnit
 import com.example.data.MovementType
 import com.example.data.ReceivingSessionSummary
+import com.example.data.ShopSessionState
+import com.example.data.StaffRole
 import com.example.data.TemperatureZone
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -38,8 +42,12 @@ data class DashboardUiState(
     val dueSoonCount: Int = 0,
     val atRisk7DaysCount: Int = 0,
     val onTrackCount: Int = 0,
-    val feedbackMessage: String? = null
-)
+    val sessionState: ShopSessionState = ShopSessionState(),
+    val feedbackMessage: String? = null,
+    val streamError: String? = null
+) {
+    val activeRole: StaffRole get() = sessionState.activeRole
+}
 
 class DashboardViewModel(
     private val repository: ColdStorageRepository
@@ -50,8 +58,9 @@ class DashboardViewModel(
     val uiState: StateFlow<DashboardUiState> = combine(
         repository.activeItemsFefo,
         repository.sessionSummaries,
+        repository.sessionState,
         _feedback
-    ) { items, sessions, feedback ->
+    ) { items, sessions, session, feedback ->
         val totalKg = items.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.currentQuantity }
         val otherUnits = items.filter { it.unitEnum != MeasurementUnit.KG }.sumOf { it.currentQuantity.toInt() }
         val expiredCount = items.count { it.urgency == ExpiryUrgency.VENCIDO }
@@ -101,7 +110,17 @@ class DashboardViewModel(
             dueSoonCount = dueSoonCount,
             atRisk7DaysCount = atRisk7DaysCount,
             onTrackCount = onTrackCount,
-            feedbackMessage = feedback
+            sessionState = session,
+            feedbackMessage = feedback,
+            streamError = session.errorMessage
+        )
+    }.catch { error ->
+        val rootError = unwrapFirestoreStreamError(error)
+        Log.w("DashboardVM", "Error observing dashboard", rootError)
+        emit(
+            DashboardUiState(
+                streamError = friendlyFirestoreMessage(rootError, "Falha ao carregar painel.")
+            )
         )
     }.stateIn(
         scope = viewModelScope,
@@ -110,18 +129,24 @@ class DashboardViewModel(
     )
 
     fun recordStockOut(
-        itemId: Long,
+        itemId: String,
         movementType: MovementType,
         quantity: Double,
         reason: String
     ) {
         viewModelScope.launch {
-            val ok = repository.recordStockOut(itemId, movementType, quantity, reason)
-            _feedback.value = if (ok) {
-                "Baixa registrada: ${movementType.displayName}"
-            } else {
-                "Não foi possível registrar a baixa. Verifique a quantidade."
-            }
+            repository.recordStockOut(itemId, movementType, quantity, reason).fold(
+                onSuccess = { ok ->
+                    _feedback.value = if (ok) {
+                        "Baixa registrada: ${movementType.displayName}"
+                    } else {
+                        "Não foi possível registrar a baixa. Verifique a quantidade."
+                    }
+                },
+                onFailure = { err ->
+                    _feedback.value = friendlyFirestoreMessage(err, "Erro ao registrar baixa no estoque.")
+                }
+            )
         }
     }
 

@@ -24,6 +24,7 @@ import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.AcUnit
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowOutward
+import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.Inventory2
 import androidx.compose.material.icons.rounded.Thermostat
 import androidx.compose.material.icons.rounded.Warning
@@ -38,6 +39,7 @@ import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -57,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
+import com.example.data.StaffRole
 import com.example.data.ThermalCompliance
 import com.example.ui.components.ExpiryUrgencyBadge
 import com.example.ui.components.MeatTypePill
@@ -85,6 +88,7 @@ fun DashboardScreen(
     viewModel: DashboardViewModel,
     onNavigateToReceiving: () -> Unit,
     onNavigateToInventory: (UrgencyFilter) -> Unit,
+    onOpenTeamAccess: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -114,11 +118,32 @@ fun DashboardScreen(
         ) {
             item {
                 HeroColdHeader(
+                    shopName = state.sessionState.shopInfo?.name?.ifBlank { "AMAZONAS CENTER" } ?: "AMAZONAS CENTER",
+                    memberName = state.sessionState.currentMember?.displayName.orEmpty(),
+                    activeRole = state.activeRole,
                     totalKg = state.totalKg,
                     totalOtherUnits = state.totalOtherUnits,
                     activeLotCount = state.activeLotCount,
-                    onReceiveClick = onNavigateToReceiving
+                    onReceiveClick = onNavigateToReceiving,
+                    onOpenTeamAccess = onOpenTeamAccess
                 )
+            }
+
+            if (state.streamError != null) {
+                item {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = state.streamError!!,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                }
             }
 
             item {
@@ -169,6 +194,7 @@ fun DashboardScreen(
                 items(state.priorityFefoItems, key = { "${it.id}_${it.expiryDateEpochDay}" }) { item ->
                     FefoPriorityItemCard(
                         item = item,
+                        canEditStock = state.activeRole.canEditReceivingOrStock,
                         onStockOutClick = { stockOutTarget = item }
                     )
                 }
@@ -236,10 +262,14 @@ fun DashboardScreen(
 
 @Composable
 private fun HeroColdHeader(
+    shopName: String,
+    memberName: String,
+    activeRole: StaffRole,
     totalKg: Double,
     totalOtherUnits: Int,
     activeLotCount: Int,
-    onReceiveClick: () -> Unit
+    onReceiveClick: () -> Unit,
+    onOpenTeamAccess: () -> Unit
 ) {
     Box(
         modifier = Modifier
@@ -260,7 +290,8 @@ private fun HeroColdHeader(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.AcUnit,
@@ -269,11 +300,50 @@ private fun HeroColdHeader(
                         modifier = Modifier.size(22.dp)
                     )
                     Text(
-                        text = "AMAZONAS CENTER • CÂMARA FRIA",
+                        text = "${shopName.uppercase()} • CÂMARA FRIA",
                         style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
-                        color = Color(0xFFBAE6FD)
+                        color = Color(0xFFBAE6FD),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
+                Spacer(Modifier.width(8.dp))
+                Surface(
+                    color = Color.White.copy(alpha = 0.14f),
+                    shape = RoundedCornerShape(999.dp),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .clickable(onClick = onOpenTeamAccess)
+                        .testTag("open_team_access_button")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Badge,
+                            contentDescription = "Equipe e Cargo",
+                            tint = Color(0xFF7DD3FC),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = activeRole.displayName,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+
+            if (memberName.isNotBlank()) {
+                Text(
+                    text = "Colaborador: $memberName • $activeLotCount lotes ativos",
+                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
+                    color = Color.White.copy(alpha = 0.85f)
+                )
+            } else {
                 Text(
                     text = "$activeLotCount lotes ativos",
                     style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
@@ -488,6 +558,7 @@ private fun ChamberSummaryCard(
 @Composable
 private fun FefoPriorityItemCard(
     item: ColdStorageItemEntity,
+    canEditStock: Boolean,
     onStockOutClick: () -> Unit
 ) {
     Card(
@@ -540,19 +611,21 @@ private fun FefoPriorityItemCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 ExpiryUrgencyBadge(expiryEpochDay = item.expiryDateEpochDay)
-                FilledTonalButton(
-                    onClick = onStockOutClick,
-                    modifier = Modifier
-                        .height(48.dp)
-                        .testTag("fefo_stock_out_button_${item.id}")
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.ArrowOutward,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text("Dar Baixa")
+                if (canEditStock) {
+                    FilledTonalButton(
+                        onClick = onStockOutClick,
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("fefo_stock_out_button_${item.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowOutward,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Dar Baixa")
+                    }
                 }
             }
         }
