@@ -169,20 +169,28 @@ fun ManualItemSheet(
                     .testTag("manual_cut_input")
             )
 
-            Text("Sugestões rápidas de corte (${meatType.displayName})", style = MaterialTheme.typography.labelMedium)
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                meatType.presetCuts.take(10).forEach { preset ->
-                    FilterChip(
-                        selected = cutName.equals(preset, ignoreCase = true),
-                        onClick = {
-                            cutName = preset
-                            errorMsg = null
-                        },
-                        label = { Text(preset) }
-                    )
+            val matchingCutPresets = remember(cutName, meatType) {
+                if (cutName.length >= 1) {
+                    meatType.presetCuts.filter { it.contains(cutName, ignoreCase = true) && !it.equals(cutName, ignoreCase = true) }.take(5)
+                } else {
+                    emptyList()
+                }
+            }
+            if (matchingCutPresets.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Sugestão na escrita:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        matchingCutPresets.forEach { preset ->
+                            FilterChip(
+                                selected = false,
+                                onClick = {
+                                    cutName = preset
+                                    errorMsg = null
+                                },
+                                label = { Text(preset) }
+                            )
+                        }
+                    }
                 }
             }
 
@@ -237,18 +245,43 @@ fun ManualItemSheet(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
                     singleLine = true,
                     modifier = Modifier
-                        .weight(1.1f)
+                        .weight(1f)
                         .testTag("manual_temp_input")
                 )
-                OutlinedTextField(
-                    value = chamberName,
-                    onValueChange = { chamberName = it },
-                    label = { Text("Câmara / Local") },
-                    singleLine = true,
-                    modifier = Modifier
-                        .weight(1.5f)
-                        .testTag("manual_chamber_input")
-                )
+            }
+
+            Text("Categoria de Armazenamento", style = MaterialTheme.typography.titleSmall)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                TemperatureZone.entries.forEach { z ->
+                    FilterChip(
+                        selected = chamberName.equals(z.displayName, ignoreCase = true) || zone == z,
+                        onClick = {
+                            zone = z
+                            chamberName = z.displayName
+                            val nextTemp = if (initialItem == null && z == defaultZone && sessionTempCelsius != null) {
+                                sessionTempCelsius
+                            } else {
+                                z.defaultTempCelsius
+                            }
+                            tempText = String.format(Locale.US, "%.1f", nextTemp)
+                            if (initialItem == null) {
+                                val days = if (z == TemperatureZone.CONGELADO) {
+                                    meatType.defaultFrozenDays
+                                } else {
+                                    meatType.defaultChilledDays
+                                }
+                                expiryEpochDay = DateUtils.addDaysToTodayEpochDay(days)
+                            }
+                        },
+                        label = { Text(z.displayName) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("manual_category_${z.name.lowercase()}")
+                    )
+                }
             }
 
             tempText.replace(',', '.').toDoubleOrNull()?.let { parsedTemp ->

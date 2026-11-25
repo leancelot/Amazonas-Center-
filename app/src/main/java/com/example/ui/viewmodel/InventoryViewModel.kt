@@ -29,7 +29,9 @@ data class InventoryUiState(
     val searchQuery: String = "",
     val selectedMeatType: MeatType? = null,
     val selectedZone: TemperatureZone? = null,
+    val selectedSupplier: String? = null,
     val urgencyFilter: UrgencyFilter = UrgencyFilter.ALL,
+    val availableSuppliers: List<String> = emptyList(),
     val filteredItems: List<ColdStorageItemEntity> = emptyList(),
     val totalFilteredKg: Double = 0.0,
     val totalFilteredOtherUnits: Int = 0,
@@ -43,6 +45,7 @@ class InventoryViewModel(
     private val _searchQuery = MutableStateFlow("")
     private val _selectedMeat = MutableStateFlow<MeatType?>(null)
     private val _selectedZone = MutableStateFlow<TemperatureZone?>(null)
+    private val _selectedSupplier = MutableStateFlow<String?>(null)
     private val _urgencyFilter = MutableStateFlow(UrgencyFilter.ALL)
     private val _feedback = MutableStateFlow<String?>(null)
 
@@ -51,6 +54,7 @@ class InventoryViewModel(
         _searchQuery,
         _selectedMeat,
         _selectedZone,
+        _selectedSupplier,
         _urgencyFilter,
         _feedback
     ) { values ->
@@ -59,8 +63,11 @@ class InventoryViewModel(
         val query = values[1] as String
         val meat = values[2] as MeatType?
         val zone = values[3] as TemperatureZone?
-        val urgency = values[4] as UrgencyFilter
-        val feedback = values[5] as String?
+        val supplier = values[4] as String?
+        val urgency = values[5] as UrgencyFilter
+        val feedback = values[6] as String?
+
+        val availableSuppliers = items.map { it.supplierName }.filter { it.isNotBlank() }.distinct().sorted()
 
         val q = query.trim().lowercase()
         val filtered = items.filter { item ->
@@ -74,6 +81,7 @@ class InventoryViewModel(
                 item.notes.lowercase().contains(q)
             val matchesMeat = meat == null || item.meatTypeEnum == meat
             val matchesZone = zone == null || item.zoneEnum == zone
+            val matchesSupplier = supplier == null || item.supplierName.equals(supplier, ignoreCase = true)
             val matchesUrgency = when (urgency) {
                 UrgencyFilter.ALL -> true
                 UrgencyFilter.DUE_SOON -> item.urgency == ExpiryUrgency.VENCE_HOJE ||
@@ -82,7 +90,7 @@ class InventoryViewModel(
                 UrgencyFilter.ON_TRACK -> item.urgency == ExpiryUrgency.ATENCAO_7_DIAS ||
                     item.urgency == ExpiryUrgency.EM_DIA
             }
-            matchesQuery && matchesMeat && matchesZone && matchesUrgency
+            matchesQuery && matchesMeat && matchesZone && matchesSupplier && matchesUrgency
         }
 
         val totalKg = filtered
@@ -96,7 +104,9 @@ class InventoryViewModel(
             searchQuery = query,
             selectedMeatType = meat,
             selectedZone = zone,
+            selectedSupplier = supplier,
             urgencyFilter = urgency,
+            availableSuppliers = availableSuppliers,
             filteredItems = filtered,
             totalFilteredKg = totalKg,
             totalFilteredOtherUnits = totalOtherUnits,
@@ -118,6 +128,10 @@ class InventoryViewModel(
 
     fun toggleZoneFilter(zone: TemperatureZone?) {
         _selectedZone.value = if (_selectedZone.value == zone) null else zone
+    }
+
+    fun toggleSupplierFilter(supplierName: String?) {
+        _selectedSupplier.value = if (_selectedSupplier.value == supplierName) null else supplierName
     }
 
     fun setUrgencyFilter(filter: UrgencyFilter) {

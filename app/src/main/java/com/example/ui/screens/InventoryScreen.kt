@@ -192,6 +192,29 @@ fun InventoryScreen(
                         )
                     }
                 }
+
+                // Supplier / Frigorífico Filters
+                if (state.availableSuppliers.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = state.selectedSupplier == null,
+                            onClick = { viewModel.toggleSupplierFilter(null) },
+                            label = { Text("Todos os frigoríficos") }
+                        )
+                        state.availableSuppliers.forEach { supplier ->
+                            FilterChip(
+                                selected = state.selectedSupplier == supplier,
+                                onClick = { viewModel.toggleSupplierFilter(supplier) },
+                                label = { Text(supplier) }
+                            )
+                        }
+                    }
+                }
             }
 
             LazyColumn(
@@ -228,7 +251,7 @@ fun InventoryScreen(
                         }
                     }
                 } else {
-                    items(state.filteredItems, key = { it.id }) { item ->
+                    items(state.filteredItems, key = { "${it.id}_${it.currentQuantity}" }) { item ->
                         InventoryLotCard(
                             item = item,
                             onClick = { selectedItem = item },

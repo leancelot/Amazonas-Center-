@@ -166,7 +166,7 @@ fun DashboardScreen(
                     EmptyColdStorageCard(onReceiveClick = onNavigateToReceiving)
                 }
             } else {
-                items(state.priorityFefoItems, key = { it.id }) { item ->
+                items(state.priorityFefoItems, key = { "${it.id}_${it.expiryDateEpochDay}" }) { item ->
                     FefoPriorityItemCard(
                         item = item,
                         onStockOutClick = { stockOutTarget = item }
@@ -182,7 +182,7 @@ fun DashboardScreen(
                         onAction = onNavigateToReceiving
                     )
                 }
-                items(state.recentSessions, key = { it.id }) { session ->
+                items(state.recentSessions, key = { "${it.id}_${it.receivedAtMillis}_${it.invoiceNumber}" }) { session ->
                     OutlinedCard(
                         modifier = Modifier.fillMaxWidth()
                     ) {
