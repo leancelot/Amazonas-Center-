@@ -2,6 +2,7 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.example.data.ChamberTempLogStore
 import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
 import com.example.data.LocalColdStorageRepository
@@ -9,8 +10,16 @@ import com.example.data.MeatType
 import com.example.data.MeasurementUnit
 import com.example.data.ReceivingSessionEntity
 import com.example.data.TemperatureZone
+import com.example.data.ThermalCompliance
 import com.example.domain.invoice.InvoiceAiExtractor
 import com.example.domain.invoice.InvoiceLocalExtractor
+import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialUnknownException
+import androidx.credentials.exceptions.NoCredentialException
+import com.example.notifications.ExpiryNotificationManager
+import com.example.ui.auth.AuthDeviceContext
+import com.example.ui.auth.AuthFailureCategory
+import com.example.ui.auth.GoogleAuthExceptionHandler
 import com.example.ui.viewmodel.DashboardViewModel
 import com.example.ui.viewmodel.InventoryViewModel
 import com.example.ui.viewmodel.ReceivingViewModel
@@ -23,6 +32,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -172,6 +183,139 @@ class ExampleRobolectricTest {
                 it.filteredItems.size == 1
         }
         assertEquals(listOf("Maminha"), invZone.filteredItems.map { it.cutName })
+    }
+
+    @Test
+    fun `chamber temperature rounds, backup json roundtrip, and expiry alert cache work end to end`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val tempStore = ChamberTempLogStore(context)
+        tempStore.clearAll()
+        val repository = LocalColdStorageRepository(context, tempStore)
+        repository.clearAllLocalData()
+
+        repository.saveReceivingSession(
+            session = ReceivingSessionEntity(
+                invoiceNumber = "9001",
+                supplierName = "Frigorífico Cerrado",
+                receivedAtMillis = System.currentTimeMillis()
+            ),
+            items = listOf(
+                ColdStorageItemEntity(
+                    cutName = "Contrafilé",
+                    temperatureZone = TemperatureZone.RESFRIADO.name,
+                    initialQuantity = 14.0,
+                    currentQuantity = 14.0,
+                    unit = MeasurementUnit.KG.name,
+                    expiryDateEpochDay = DateUtils.addDaysToTodayEpochDay(5)
+                )
+            )
+        )
+
+        val dashboardVm = DashboardViewModel(repository, tempStore, context)
+        dashboardVm.recordChamberTemperature(
+            chamberName = "Congelado",
+            zone = TemperatureZone.CONGELADO,
+            measuredTempCelsius = -19.5,
+            responsibleName = "Leandro",
+            notes = "Porta vedada"
+        )
+
+        val afterRound = dashboardVm.uiState.awaitMatching {
+            it.activeLotCount == 1 && it.todayTempLogs.size == 1
+        }
+        assertEquals(ThermalCompliance.CONFORME, afterRound.latestTempLog?.complianceEnum)
+        assertEquals("Congelado", afterRound.latestTempLog?.chamberName)
+
+        // Cached expiry lots for alarm receiver should reflect active lot
+        val cachedDigest = ExpiryNotificationManager.readCachedDigest(context)
+        assertEquals(1, cachedDigest.due7DaysCount)
+
+        // Export JSON backup -> wipe local data -> reject invalid JSON -> restore valid JSON
+        val exportedJson = repository.exportBackupJson().getOrThrow()
+        assertTrue(exportedJson.contains("Frigorífico Cerrado"))
+        assertTrue(exportedJson.contains("Contrafilé"))
+        assertTrue(exportedJson.contains("Porta vedada"))
+
+        repository.clearAllLocalData()
+        val afterClear = dashboardVm.uiState.awaitMatching {
+            it.activeLotCount == 0 && it.chamberTempLogs.isEmpty()
+        }
+        assertEquals(0, afterClear.todaySessions.size)
+
+        assertTrue(repository.parseBackupEnvelope("not valid json").isFailure)
+        assertTrue(repository.parseBackupEnvelope("{\"hello\":1}").isFailure)
+
+        val parsedEnvelope = repository.parseBackupEnvelope(exportedJson).getOrThrow()
+        val restoreSummary = repository.restoreFromBackupEnvelope(parsedEnvelope).getOrThrow()
+        assertEquals(1, restoreSummary.sessionCount)
+        assertEquals(1, restoreSummary.itemCount)
+        assertEquals(1, restoreSummary.temperatureLogCount)
+
+        val restoredState = dashboardVm.uiState.awaitMatching {
+            it.activeLotCount == 1 && it.chamberTempLogs.size == 1
+        }
+        assertEquals("Contrafilé", restoredState.activeItems.first().cutName)
+        assertEquals("Porta vedada", restoredState.chamberTempLogs.first().notes)
+
+        val updatedSettings = ExpiryNotificationManager.setAlertsEnabled(
+            context = context,
+            enabled = true,
+            hour = 7,
+            minute = 0
+        )
+        assertTrue(updatedSettings.enabled)
+        assertEquals(7, updatedSettings.hour)
+        val disabledSettings = ExpiryNotificationManager.setAlertsEnabled(context, enabled = false)
+        assertFalse(disabledSettings.enabled)
+    }
+
+    @Test
+    fun `google auth exception handler classifies code 16 reauth failed and builds full diagnostic report`() {
+        val rootCause = IllegalStateException("16: Account reauth failed.")
+        val wrapped = GetCredentialCancellationException("[16] Account reauth failed.")
+        wrapped.initCause(rootCause)
+
+        assertEquals(AuthFailureCategory.REAUTH_16, GoogleAuthExceptionHandler.classify(wrapped))
+        assertTrue(GoogleAuthExceptionHandler.shouldAttemptFallback(wrapped))
+
+        val nestedUnknown = GetCredentialUnknownException("Failed").apply { initCause(rootCause) }
+        assertEquals(AuthFailureCategory.REAUTH_16, GoogleAuthExceptionHandler.classify(nestedUnknown))
+
+        val plainCancel = GetCredentialCancellationException("User cancelled the selector")
+        assertEquals(AuthFailureCategory.USER_CANCELLED, GoogleAuthExceptionHandler.classify(plainCancel))
+        assertFalse(GoogleAuthExceptionHandler.shouldAttemptFallback(plainCancel))
+
+        val noCred = NoCredentialException("No credentials available")
+        assertEquals(AuthFailureCategory.NO_CREDENTIAL, GoogleAuthExceptionHandler.classify(noCred))
+        assertTrue(GoogleAuthExceptionHandler.shouldAttemptFallback(noCred))
+
+        val deviceCtx = AuthDeviceContext(
+            buildType = "Release",
+            packageName = "com.aistudio.frigstock.krmvqt",
+            androidSdk = 35,
+            deviceModel = "Samsung SM-A546E",
+            sha1 = "AA:BB:CC:DD:EE:FF",
+            sha256 = "11:22:33",
+            matchesDebugSha1 = false,
+            webClientIdMasked = "388813631254-...apps.googleusercontent.com",
+            playServicesVersion = "24.47.38 (244738000)",
+            playServicesEnabled = true
+        )
+
+        val report = GoogleAuthExceptionHandler.buildReport(
+            throwable = wrapped,
+            deviceContext = deviceCtx,
+            traceLines = listOf("[03:52:00.001] INFO [Init] Test trace"),
+            phase = "FallbackGetGoogleId"
+        )
+
+        assertEquals(AuthFailureCategory.REAUTH_16, report.category)
+        assertTrue(report.suggestGuestMode)
+        assertTrue(report.headline.contains("16"))
+        assertTrue(report.probableCause.contains("AA:BB:CC:DD:EE:FF"))
+        assertTrue(report.technicalLog.contains("GetCredentialCancellationException"))
+        assertTrue(report.technicalLog.contains("16: Account reauth failed."))
+        assertTrue(report.technicalLog.contains("Test trace"))
     }
 
     private fun <T> StateFlow<T>.awaitMatching(

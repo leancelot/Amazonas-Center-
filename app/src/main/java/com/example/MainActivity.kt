@@ -55,6 +55,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.ai.configureAppCheck
+import com.example.data.ChamberTempLogStore
 import com.example.data.ColdStorageRepository
 import com.example.data.FirestoreColdStorageRepository
 import com.example.data.LocalColdStorageRepository
@@ -215,9 +216,13 @@ private fun FrigStockShell(
     val scope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
 
-    val repository: ColdStorageRepository = remember(sessionKey) {
+    val chamberTempLogStore = remember(context) {
+        ChamberTempLogStore(context.applicationContext)
+    }
+
+    val repository: ColdStorageRepository = remember(sessionKey, chamberTempLogStore) {
         if (isLocalMode) {
-            LocalColdStorageRepository(context.applicationContext)
+            LocalColdStorageRepository(context.applicationContext, chamberTempLogStore)
         } else {
             val databaseId = context.applicationContext.getString(R.string.firestore_database_id)
             val db = FirebaseFirestore.getInstance(databaseId)
@@ -230,11 +235,13 @@ private fun FrigStockShell(
         }
     }
 
-    val factory = remember(repository) {
+    val factory = remember(repository, chamberTempLogStore) {
         FrigStockViewModelFactory(
             repository = repository,
             localExtractor = InvoiceLocalExtractor(),
-            aiExtractor = InvoiceAiExtractor()
+            aiExtractor = InvoiceAiExtractor(),
+            chamberTempLogStore = chamberTempLogStore,
+            appContext = context.applicationContext
         )
     }
 

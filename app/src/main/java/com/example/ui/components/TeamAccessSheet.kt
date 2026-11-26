@@ -22,6 +22,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -36,6 +37,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -74,6 +76,7 @@ fun TeamAccessSheet(
 
     var inviteEmail by remember { mutableStateOf("") }
     var inviteRole by remember { mutableStateOf(StaffRole.CONFERENTE) }
+    var showClearLocalConfirm by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -203,7 +206,7 @@ fun TeamAccessSheet(
                             }
                             if (onClearLocalData != null) {
                                 OutlinedButton(
-                                    onClick = onClearLocalData,
+                                    onClick = { showClearLocalConfirm = true },
                                     modifier = Modifier
                                         .height(48.dp)
                                         .testTag("clear_local_data_button")
@@ -446,5 +449,31 @@ fun TeamAccessSheet(
                 }
             }
         }
+    }
+
+    if (showClearLocalConfirm && onClearLocalData != null) {
+        AlertDialog(
+            onDismissRequest = { showClearLocalConfirm = false },
+            title = { Text("Limpar dados locais?") },
+            text = {
+                Text("Todos os recebimentos, lotes, baixas e rondas térmicas salvos neste aparelho serão apagados. Exporte um backup JSON antes se quiser guardar uma cópia.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showClearLocalConfirm = false
+                        onClearLocalData()
+                    },
+                    modifier = Modifier.testTag("confirm_clear_local_data_button")
+                ) {
+                    Text("Apagar Tudo")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearLocalConfirm = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
     }
 }

@@ -23,6 +23,7 @@ import com.example.domain.invoice.LocalInvoiceOcrParser
 import com.example.domain.invoice.MeatCatalogMatcher
 import com.example.domain.invoice.OcrLineBox
 import com.example.domain.invoice.OcrPageInput
+import com.example.notifications.ExpiryAlertCalculator
 import com.example.ui.viewmodel.ReceivingViewModel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -95,6 +96,72 @@ class InvoiceAndDomainUnitTest {
         assertTrue(DateUtils.isToday(now))
         assertFalse(DateUtils.isToday(now - 86_400_000L * 2L))
         assertFalse(DateUtils.isToday(0L))
+    }
+
+    @Test
+    fun `expiry alert calculator aggregates expired, 7d, 15d and excludes clean items`() {
+        val items = listOf(
+            ColdStorageItemEntity(
+                id = "1",
+                cutName = "Picanha",
+                currentQuantity = 5.0,
+                expiryDateEpochDay = DateUtils.addDaysToTodayEpochDay(-2)
+            ),
+            ColdStorageItemEntity(
+                id = "2",
+                cutName = "Alcatra",
+                currentQuantity = 8.0,
+                expiryDateEpochDay = DateUtils.todayEpochDay()
+            ),
+            ColdStorageItemEntity(
+                id = "3",
+                cutName = "Costela",
+                currentQuantity = 10.0,
+                expiryDateEpochDay = DateUtils.addDaysToTodayEpochDay(7)
+            ),
+            ColdStorageItemEntity(
+                id = "4",
+                cutName = "Maminha",
+                currentQuantity = 4.0,
+                expiryDateEpochDay = DateUtils.addDaysToTodayEpochDay(15)
+            ),
+            ColdStorageItemEntity(
+                id = "5",
+                cutName = "Cupim",
+                currentQuantity = 12.0,
+                expiryDateEpochDay = DateUtils.addDaysToTodayEpochDay(30)
+            ),
+            ColdStorageItemEntity(
+                id = "6",
+                cutName = "Zerado",
+                currentQuantity = 0.0,
+                expiryDateEpochDay = DateUtils.addDaysToTodayEpochDay(-5)
+            )
+        )
+
+        val digest = ExpiryAlertCalculator.fromItems(items)
+        assertEquals(1, digest.expiredCount)
+        assertEquals(2, digest.due7DaysCount)
+        assertEquals(1, digest.due15DaysCount)
+        assertEquals(4, digest.totalAlertCount)
+        assertTrue(digest.hasUrgentAlerts)
+        assertTrue(digest.buildNotificationTitle().contains("1 vencido(s)"))
+        assertTrue(digest.buildNotificationTitle().contains("2 até 7d"))
+        assertTrue(digest.buildNotificationTitle().contains("1 em 8-15d"))
+        assertTrue(digest.buildNotificationBody().contains("Picanha"))
+
+        val cleanDigest = ExpiryAlertCalculator.fromItems(
+            listOf(
+                ColdStorageItemEntity(
+                    id = "ok",
+                    cutName = "Lombo",
+                    currentQuantity = 5.0,
+                    expiryDateEpochDay = DateUtils.addDaysToTodayEpochDay(25)
+                )
+            )
+        )
+        assertFalse(cleanDigest.hasUrgentAlerts)
+        assertEquals(0, cleanDigest.totalAlertCount)
     }
 
     @Test

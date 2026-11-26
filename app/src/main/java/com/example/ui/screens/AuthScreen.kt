@@ -26,8 +26,11 @@ import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.VerifiedUser
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -57,6 +60,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
+import com.example.ui.auth.AuthFailureCategory
+import com.example.ui.auth.AuthFailureReport
 import com.example.ui.auth.attemptAutoSignIn
 import com.example.ui.auth.onGoogleSignInClicked
 import com.example.ui.theme.ColdNavyLight
@@ -75,7 +80,9 @@ fun AuthScreen(
 
     var isAutoChecking by remember { mutableStateOf(true) }
     var isSigningIn by remember { mutableStateOf(false) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var failureReport by remember { mutableStateOf<AuthFailureReport?>(null) }
+    var showTechnicalLog by remember { mutableStateOf(false) }
+    var showGuestFallbackDialog by remember { mutableStateOf(false) }
     var copiedError by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
@@ -176,8 +183,7 @@ fun AuthScreen(
                     }
                 }
 
-                if (errorMessage != null) {
-                    val currentError = errorMessage!!
+                failureReport?.let { report ->
                     Surface(
                         color = MaterialTheme.colorScheme.errorContainer,
                         shape = MaterialTheme.shapes.medium,
@@ -200,27 +206,80 @@ fun AuthScreen(
                                     modifier = Modifier.size(20.dp)
                                 )
                                 Text(
-                                    text = "Não foi possível concluir o login",
+                                    text = report.headline,
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onErrorContainer
                                 )
                             }
-                            SelectionContainer {
+                            Text(
+                                text = report.userSummary,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                            Surface(
+                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
+                                shape = MaterialTheme.shapes.small,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
                                 Text(
-                                    text = currentError,
+                                    text = "Causa provável: ${report.probableCause}",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.padding(10.dp)
                                 )
                             }
+
+                            if (report.suggestGuestMode) {
+                                Button(
+                                    onClick = onContinueLocalMode,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(48.dp)
+                                        .testTag("fallback_guest_mode_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.PhoneAndroid,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Continuar no Modo Convidado (Local)")
+                                }
+                            }
+
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
+                                TextButton(
+                                    onClick = { showTechnicalLog = !showTechnicalLog },
+                                    modifier = Modifier.testTag("toggle_auth_log_button")
+                                ) {
+                                    Icon(
+                                        imageVector = if (showTechnicalLog) {
+                                            Icons.Rounded.ExpandLess
+                                        } else {
+                                            Icons.Rounded.ExpandMore
+                                        },
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        text = if (showTechnicalLog) "Ocultar log técnico" else "Ver log técnico",
+                                        color = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                }
+
                                 TextButton(
                                     onClick = {
                                         val clipboard = context.getSystemService(ClipboardManager::class.java)
-                                        clipboard?.setPrimaryClip(ClipData.newPlainText("Erro de Login", currentError))
+                                        clipboard?.setPrimaryClip(
+                                            ClipData.newPlainText("Diagnóstico Login Google", report.technicalLog)
+                                        )
                                         copiedError = true
                                     },
                                     modifier = Modifier.testTag("copy_auth_error_button")
@@ -233,9 +292,26 @@ fun AuthScreen(
                                     )
                                     Spacer(Modifier.width(6.dp))
                                     Text(
-                                        text = if (copiedError) "Copiado" else "Copiar erro",
+                                        text = if (copiedError) "Copiado" else "Copiar log",
                                         color = MaterialTheme.colorScheme.onErrorContainer
                                     )
+                                }
+                            }
+
+                            if (showTechnicalLog) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surface,
+                                    shape = MaterialTheme.shapes.small,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    SelectionContainer {
+                                        Text(
+                                            text = report.technicalLog,
+                                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            modifier = Modifier.padding(10.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -244,7 +320,8 @@ fun AuthScreen(
 
                 Button(
                     onClick = {
-                        errorMessage = null
+                        failureReport = null
+                        showTechnicalLog = false
                         copiedError = false
                         isSigningIn = true
                         onGoogleSignInClicked(
@@ -254,15 +331,14 @@ fun AuthScreen(
                                 isSigningIn = false
                                 onAuthSuccess()
                             },
-                            onAuthError = { msg ->
+                            onAuthFailure = { report ->
                                 isSigningIn = false
-                                errorMessage = msg
+                                failureReport = report
+                                if (report.category != AuthFailureCategory.USER_CANCELLED && report.suggestGuestMode) {
+                                    showGuestFallbackDialog = true
+                                }
                             },
-                            scope = scope,
-                            onAuthCancelled = { reason ->
-                                isSigningIn = false
-                                errorMessage = reason
-                            }
+                            scope = scope
                         )
                     },
                     enabled = !isSigningIn && !isAutoChecking,
@@ -309,19 +385,54 @@ fun AuthScreen(
                     )
                     Spacer(Modifier.width(10.dp))
                     Text(
-                        text = "Pular login (Testar em modo local)",
+                        text = "Modo Convidado (Salvar Localmente)",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
 
                 Text(
-                    text = "No modo local, seus recebimentos e estoque ficam salvos apenas neste aparelho para testes. Entre com Google quando quiser sincronizar na nuvem.",
+                    text = "No Modo Convidado, seus recebimentos, rondas térmicas, estoque e backups JSON funcionam normalmente neste aparelho sem depender do login Google.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
+    }
+
+    if (showGuestFallbackDialog && failureReport != null) {
+        val report = failureReport!!
+        AlertDialog(
+            onDismissRequest = { showGuestFallbackDialog = false },
+            title = { Text(report.headline) },
+            text = {
+                Text(
+                    "${report.userSummary}\n\n${report.probableCause}\n\nVocê pode entrar agora mesmo no Modo Convidado com salvamento local e backup JSON."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showGuestFallbackDialog = false
+                        onContinueLocalMode()
+                    },
+                    modifier = Modifier.testTag("dialog_guest_mode_button")
+                ) {
+                    Text("Entrar no Modo Convidado")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showGuestFallbackDialog = false
+                        showTechnicalLog = true
+                    },
+                    modifier = Modifier.testTag("dialog_view_log_button")
+                ) {
+                    Text("Ver Log Detalhado")
+                }
+            }
+        )
     }
 }
 

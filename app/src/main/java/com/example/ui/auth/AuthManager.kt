@@ -5,16 +5,19 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.util.Log
 import androidx.credentials.ClearCredentialStateRequest
+import androidx.credentials.Credential
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialCustomException
 import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.GetCredentialInterruptedException
+import androidx.credentials.exceptions.GetCredentialProviderConfigurationException
+import androidx.credentials.exceptions.GetCredentialUnknownException
+import androidx.credentials.exceptions.GetCredentialUnsupportedException
 import androidx.credentials.exceptions.NoCredentialException
-import com.example.BuildConfig
 import com.example.R
-import com.example.ai.REGISTERED_DEBUG_SHA1
-import com.example.ai.readApkShaFingerprints
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
@@ -56,18 +59,23 @@ fun attemptAutoSignIn(
     onUnauthenticated: () -> Unit,
     scope: CoroutineScope
 ) {
-    if (Firebase.auth.currentUser != null) {
+    val trace = AuthTraceRecorder()
+    val existingUser = Firebase.auth.currentUser
+    if (existingUser != null) {
+        trace.info("AutoSignIn", "Sessão Firebase já ativa (uid=${existingUser.uid.take(8)}...).")
         onAuthSuccess()
         return
     }
     val activityContext = context.findActivity()
     if (activityContext == null) {
+        trace.warn("AutoSignIn", "Activity não encontrada no contexto; exibindo AuthScreen.")
         onUnauthenticated()
         return
     }
     val clientId = try {
         context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        trace.error("AutoSignIn", "default_web_client_id ausente nos recursos.", e)
         onUnauthenticated()
         return
     }
@@ -82,31 +90,41 @@ fun attemptAutoSignIn(
 
     scope.launch {
         try {
+            trace.info("AutoSignIn", "Consultando credencial autorizada via GetGoogleIdOption...")
             val cred = credentialManager.getCredential(activityContext, request).credential
             if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
+                val googleCred = GoogleIdTokenCredential.createFrom(cred.data)
+                val token = googleCred.idToken
+                trace.info("AutoSignIn", "ID Token recebido (len=${token.length}); autenticando no Firebase...")
                 if (token.isNotBlank()) {
                     val result = Firebase.auth
                         .signInWithCredential(GoogleAuthProvider.getCredential(token, null))
                         .await()
                     if (result.user != null) {
+                        trace.info("AutoSignIn", "Login automático concluído com sucesso.")
                         onAuthSuccess()
                     } else {
+                        trace.warn("AutoSignIn", "Firebase retornou usuário nulo após signInWithCredential.")
                         onUnauthenticated()
                     }
                 } else {
+                    trace.warn("AutoSignIn", "ID Token retornado estava vazio.")
                     onUnauthenticated()
                 }
             } else {
+                trace.warn("AutoSignIn", "Credencial não é Google ID Token (${cred.type}).")
                 onUnauthenticated()
             }
         } catch (e: GetCredentialCancellationException) {
-            Log.w("Auth", "Auto sign-in cancelled: ${e.errorMessage ?: e.message}")
+            trace.warn("AutoSignIn", "Auto sign-in cancelado/interrompido: ${e.errorMessage ?: e.message}", e)
+            onUnauthenticated()
+        } catch (e: GetCredentialException) {
+            trace.warn("AutoSignIn", "Auto sign-in indisponível [${e.type}]: ${e.errorMessage ?: e.message}", e)
             onUnauthenticated()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w("Auth", "Auto sign-in skipped (${e.javaClass.simpleName}): ${e.message}")
+            trace.warn("AutoSignIn", "Auto sign-in ignorado (${e.javaClass.simpleName}): ${e.message}", e)
             onUnauthenticated()
         }
     }
@@ -116,22 +134,46 @@ fun onGoogleSignInClicked(
     context: Context,
     credentialManager: CredentialManager,
     onAuthSuccess: () -> Unit,
-    onAuthError: (String) -> Unit,
-    scope: CoroutineScope,
-    onAuthCancelled: (String) -> Unit = {}
+    onAuthFailure: (AuthFailureReport) -> Unit,
+    scope: CoroutineScope
 ) {
+    val trace = AuthTraceRecorder()
     val activityContext = context.findActivity()
     if (activityContext == null) {
-        onAuthError("Não foi possível identificar a tela ativa (Activity) para abrir o login do Google.")
+        trace.error("Init", "Contexto sem Activity para iniciar CredentialManager.")
+        val deviceCtx = GoogleAuthExceptionHandler.captureDeviceContext(context, "")
+        onAuthFailure(
+            GoogleAuthExceptionHandler.buildReport(
+                throwable = IllegalStateException("Activity context unavailable"),
+                deviceContext = deviceCtx,
+                traceLines = trace.snapshot(),
+                phase = "Init"
+            )
+        )
         return
     }
 
     val clientId = try {
         context.getString(R.string.default_web_client_id)
-    } catch (_: Exception) {
-        onAuthError("Configuração do Google Sign-In ausente (default_web_client_id).")
+    } catch (e: Exception) {
+        trace.error("Init", "Falha ao ler default_web_client_id.", e)
+        val deviceCtx = GoogleAuthExceptionHandler.captureDeviceContext(activityContext, "")
+        onAuthFailure(
+            GoogleAuthExceptionHandler.buildReport(
+                throwable = e,
+                deviceContext = deviceCtx,
+                traceLines = trace.snapshot(),
+                phase = "Init"
+            )
+        )
         return
     }
+
+    val deviceContext = GoogleAuthExceptionHandler.captureDeviceContext(activityContext, clientId)
+    trace.info(
+        "Init",
+        "Iniciando Google Sign-In | build=${deviceContext.buildType} sha1=${deviceContext.sha1} gms=${deviceContext.playServicesVersion} (enabled=${deviceContext.playServicesEnabled})"
+    )
 
     val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
     val request = GetCredentialRequest.Builder()
@@ -140,61 +182,173 @@ fun onGoogleSignInClicked(
 
     scope.launch {
         try {
+            trace.info("PrimaryGetSignInWithGoogle", "Abrindo seletor de contas Google (GetSignInWithGoogleOption)...")
             val cred = credentialManager.getCredential(activityContext, request).credential
+            trace.info("PrimaryGetSignInWithGoogle", "Credencial obtida: ${cred.javaClass.simpleName} (type=${cred.type})")
             handleGoogleCredential(
                 cred = cred,
+                trace = trace,
+                deviceContext = deviceContext,
+                phase = "FirebaseExchange(Primary)",
                 onAuthSuccess = onAuthSuccess,
-                onAuthError = onAuthError
+                onAuthFailure = onAuthFailure
             )
         } catch (e: GetCredentialCancellationException) {
-            val primaryDetail = (e.errorMessage?.toString() ?: e.message).orEmpty()
-            Log.w("Auth", "Google Sign-In cancelled or dismissed: $primaryDetail", e)
-            val isReauthOrAccountIssue = primaryDetail.contains("reauth", ignoreCase = true) ||
-                primaryDetail.contains("[16]") ||
-                primaryDetail.contains("16:")
-            if (isReauthOrAccountIssue) {
-                tryGoogleIdFallback(
-                    activityContext = activityContext,
-                    clientId = clientId,
-                    credentialManager = credentialManager,
-                    primaryDetail = primaryDetail,
-                    onAuthSuccess = onAuthSuccess,
-                    onAuthError = onAuthError,
-                    onAuthCancelled = onAuthCancelled
-                )
-            } else {
-                onAuthCancelled(formatCancellationDiagnostic(activityContext, primaryDetail))
-            }
-        } catch (e: NoCredentialException) {
-            Log.w("Auth", "No Google credentials found with SignInWithGoogleOption: ${e.errorMessage ?: e.message}", e)
-            tryGoogleIdFallback(
+            trace.warn(
+                "PrimaryGetSignInWithGoogle",
+                "GetCredentialCancellationException [type=${e.type}]: ${e.errorMessage ?: e.message}",
+                e
+            )
+            handlePrimaryCredentialException(
+                throwable = e,
                 activityContext = activityContext,
                 clientId = clientId,
                 credentialManager = credentialManager,
-                primaryDetail = (e.errorMessage?.toString() ?: e.message).orEmpty(),
+                deviceContext = deviceContext,
+                trace = trace,
                 onAuthSuccess = onAuthSuccess,
-                onAuthError = onAuthError,
-                onAuthCancelled = onAuthCancelled
+                onAuthFailure = onAuthFailure
+            )
+        } catch (e: NoCredentialException) {
+            trace.warn("PrimaryGetSignInWithGoogle", "NoCredentialException: ${e.errorMessage ?: e.message}", e)
+            handlePrimaryCredentialException(
+                throwable = e,
+                activityContext = activityContext,
+                clientId = clientId,
+                credentialManager = credentialManager,
+                deviceContext = deviceContext,
+                trace = trace,
+                onAuthSuccess = onAuthSuccess,
+                onAuthFailure = onAuthFailure
+            )
+        } catch (e: GetCredentialProviderConfigurationException) {
+            trace.error("PrimaryGetSignInWithGoogle", "GetCredentialProviderConfigurationException: ${e.errorMessage ?: e.message}", e)
+            onAuthFailure(
+                GoogleAuthExceptionHandler.buildReport(
+                    throwable = e,
+                    deviceContext = deviceContext,
+                    traceLines = trace.snapshot(),
+                    phase = "PrimaryProviderConfig"
+                )
+            )
+        } catch (e: GetCredentialUnsupportedException) {
+            trace.error("PrimaryGetSignInWithGoogle", "GetCredentialUnsupportedException: ${e.errorMessage ?: e.message}", e)
+            onAuthFailure(
+                GoogleAuthExceptionHandler.buildReport(
+                    throwable = e,
+                    deviceContext = deviceContext,
+                    traceLines = trace.snapshot(),
+                    phase = "PrimaryUnsupported"
+                )
+            )
+        } catch (e: GetCredentialInterruptedException) {
+            trace.warn("PrimaryGetSignInWithGoogle", "GetCredentialInterruptedException: ${e.errorMessage ?: e.message}", e)
+            handlePrimaryCredentialException(
+                throwable = e,
+                activityContext = activityContext,
+                clientId = clientId,
+                credentialManager = credentialManager,
+                deviceContext = deviceContext,
+                trace = trace,
+                onAuthSuccess = onAuthSuccess,
+                onAuthFailure = onAuthFailure
+            )
+        } catch (e: GetCredentialUnknownException) {
+            trace.error("PrimaryGetSignInWithGoogle", "GetCredentialUnknownException: ${e.errorMessage ?: e.message}", e)
+            handlePrimaryCredentialException(
+                throwable = e,
+                activityContext = activityContext,
+                clientId = clientId,
+                credentialManager = credentialManager,
+                deviceContext = deviceContext,
+                trace = trace,
+                onAuthSuccess = onAuthSuccess,
+                onAuthFailure = onAuthFailure
+            )
+        } catch (e: GetCredentialCustomException) {
+            trace.error("PrimaryGetSignInWithGoogle", "GetCredentialCustomException [${e.type}]: ${e.errorMessage ?: e.message}", e)
+            handlePrimaryCredentialException(
+                throwable = e,
+                activityContext = activityContext,
+                clientId = clientId,
+                credentialManager = credentialManager,
+                deviceContext = deviceContext,
+                trace = trace,
+                onAuthSuccess = onAuthSuccess,
+                onAuthFailure = onAuthFailure
             )
         } catch (e: GetCredentialException) {
-            Log.e("Auth", "Google Sign-In CredentialException [${e.type}]: ${e.errorMessage ?: e.message}", e)
-            val detail = (e.errorMessage?.toString() ?: e.message)?.takeIf { it.isNotBlank() }
-            onAuthError(
-                buildString {
-                    append("Erro do Google Sign-In (${e.type.substringAfterLast('.')}).")
-                    if (detail != null) append("\nDetalhe: $detail")
-                    append("\n\nVocê pode usar o modo local abaixo para testar agora ou tentar outra conta Google.")
-                }
+            trace.error("PrimaryGetSignInWithGoogle", "GetCredentialException [${e.type}]: ${e.errorMessage ?: e.message}", e)
+            onAuthFailure(
+                GoogleAuthExceptionHandler.buildReport(
+                    throwable = e,
+                    deviceContext = deviceContext,
+                    traceLines = trace.snapshot(),
+                    phase = "PrimaryCredentialException"
+                )
             )
         } catch (e: FirebaseAuthException) {
-            Log.e("Auth", "FirebaseAuthException [${e.errorCode}]: ${e.message}", e)
-            onAuthError("Erro do Firebase Auth [${e.errorCode}]: ${e.localizedMessage ?: e.message ?: "Falha ao autenticar."}")
+            trace.error("FirebaseExchange(Primary)", "FirebaseAuthException [${e.errorCode}]: ${e.message}", e)
+            onAuthFailure(
+                GoogleAuthExceptionHandler.buildReport(
+                    throwable = e,
+                    deviceContext = deviceContext,
+                    traceLines = trace.snapshot(),
+                    phase = "FirebaseExchange(Primary)"
+                )
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e("Auth", "Google Sign-In failed", e)
-            onAuthError("Falha ao entrar com Google (${e.javaClass.simpleName}): ${e.localizedMessage ?: e.message ?: "Erro desconhecido."}")
+            trace.error("PrimaryGetSignInWithGoogle", "Exceção não esperada", e)
+            onAuthFailure(
+                GoogleAuthExceptionHandler.buildReport(
+                    throwable = e,
+                    deviceContext = deviceContext,
+                    traceLines = trace.snapshot(),
+                    phase = "PrimaryUnexpected"
+                )
+            )
         }
+    }
+}
+
+private suspend fun handlePrimaryCredentialException(
+    throwable: Throwable,
+    activityContext: Activity,
+    clientId: String,
+    credentialManager: CredentialManager,
+    deviceContext: AuthDeviceContext,
+    trace: AuthTraceRecorder,
+    onAuthSuccess: () -> Unit,
+    onAuthFailure: (AuthFailureReport) -> Unit
+) {
+    val category = GoogleAuthExceptionHandler.classify(throwable)
+    trace.warn(
+        "PrimaryClassifier",
+        "Exceção classificada como ${category.name}; cadeia=${GoogleAuthExceptionHandler.collectCauseChain(throwable).joinToString(" -> ")}"
+    )
+
+    if (GoogleAuthExceptionHandler.shouldAttemptFallback(throwable)) {
+        tryGoogleIdFallback(
+            activityContext = activityContext,
+            clientId = clientId,
+            credentialManager = credentialManager,
+            deviceContext = deviceContext,
+            trace = trace,
+            primaryThrowable = throwable,
+            onAuthSuccess = onAuthSuccess,
+            onAuthFailure = onAuthFailure
+        )
+    } else {
+        onAuthFailure(
+            GoogleAuthExceptionHandler.buildReport(
+                throwable = throwable,
+                deviceContext = deviceContext,
+                traceLines = trace.snapshot(),
+                phase = "Primary(${category.name})"
+            )
+        )
     }
 }
 
@@ -202,11 +356,21 @@ private suspend fun tryGoogleIdFallback(
     activityContext: Activity,
     clientId: String,
     credentialManager: CredentialManager,
-    primaryDetail: String,
+    deviceContext: AuthDeviceContext,
+    trace: AuthTraceRecorder,
+    primaryThrowable: Throwable,
     onAuthSuccess: () -> Unit,
-    onAuthError: (String) -> Unit,
-    onAuthCancelled: (String) -> Unit
+    onAuthFailure: (AuthFailureReport) -> Unit
 ) {
+    // Limpa estado em cache do Credential Manager antes do fallback para evitar reutilizar sessão com reauth [16] travada
+    try {
+        trace.info("ClearCacheBeforeFallback", "Limpando cache local do CredentialManager...")
+        credentialManager.clearCredentialState(ClearCredentialStateRequest())
+        trace.info("ClearCacheBeforeFallback", "Cache de credenciais limpo.")
+    } catch (clearErr: Exception) {
+        trace.warn("ClearCacheBeforeFallback", "Não foi possível limpar cache de credenciais", clearErr)
+    }
+
     val fallbackOption = GetGoogleIdOption.Builder()
         .setFilterByAuthorizedAccounts(false)
         .setServerClientId(clientId)
@@ -215,89 +379,126 @@ private suspend fun tryGoogleIdFallback(
     val fallbackRequest = GetCredentialRequest.Builder()
         .addCredentialOption(fallbackOption)
         .build()
+
     try {
+        trace.info("FallbackGetGoogleId", "Tentando GetGoogleIdOption(filterByAuthorizedAccounts=false)...")
         val cred = credentialManager.getCredential(activityContext, fallbackRequest).credential
+        trace.info("FallbackGetGoogleId", "Credencial obtida no fallback: ${cred.javaClass.simpleName} (type=${cred.type})")
         handleGoogleCredential(
             cred = cred,
+            trace = trace,
+            deviceContext = deviceContext,
+            phase = "FirebaseExchange(Fallback)",
             onAuthSuccess = onAuthSuccess,
-            onAuthError = onAuthError
+            onAuthFailure = onAuthFailure
         )
-    } catch (fallbackCancel: GetCredentialCancellationException) {
-        val fallbackDetail = (fallbackCancel.errorMessage?.toString() ?: fallbackCancel.message).orEmpty()
-        Log.w("Auth", "Fallback Google Sign-In cancelled: $fallbackDetail", fallbackCancel)
-        onAuthCancelled(formatCancellationDiagnostic(activityContext, fallbackDetail.ifBlank { primaryDetail }))
-    } catch (fallbackNoCred: NoCredentialException) {
-        Log.w("Auth", "Fallback NoCredentialException: ${fallbackNoCred.errorMessage ?: fallbackNoCred.message}", fallbackNoCred)
-        onAuthCancelled(formatCancellationDiagnostic(activityContext, primaryDetail.ifBlank { fallbackNoCred.message.orEmpty() }))
-    } catch (fallbackCred: GetCredentialException) {
-        Log.e("Auth", "Fallback CredentialException [${fallbackCred.type}]: ${fallbackCred.errorMessage ?: fallbackCred.message}", fallbackCred)
-        val detail = (fallbackCred.errorMessage?.toString() ?: fallbackCred.message).orEmpty().ifBlank { primaryDetail }
-        onAuthError(
-            buildString {
-                append("Erro do Google Sign-In (${fallbackCred.type.substringAfterLast('.')}).")
-                if (detail.isNotBlank()) append("\nDetalhe: $detail")
-                append("\n\nVocê pode testar o app imediatamente usando o modo local abaixo.")
-            }
+    } catch (e: GetCredentialCancellationException) {
+        trace.warn("FallbackGetGoogleId", "Fallback cancelado/reauth: ${e.errorMessage ?: e.message}", e)
+        onAuthFailure(
+            GoogleAuthExceptionHandler.buildReport(
+                throwable = chooseMoreInformativeThrowable(primaryThrowable, e),
+                deviceContext = deviceContext,
+                traceLines = trace.snapshot(),
+                phase = "FallbackGetGoogleId"
+            )
+        )
+    } catch (e: GetCredentialException) {
+        trace.error("FallbackGetGoogleId", "Fallback GetCredentialException [${e.type}]: ${e.errorMessage ?: e.message}", e)
+        onAuthFailure(
+            GoogleAuthExceptionHandler.buildReport(
+                throwable = chooseMoreInformativeThrowable(primaryThrowable, e),
+                deviceContext = deviceContext,
+                traceLines = trace.snapshot(),
+                phase = "FallbackGetGoogleId"
+            )
         )
     } catch (e: FirebaseAuthException) {
-        Log.e("Auth", "Fallback FirebaseAuthException [${e.errorCode}]: ${e.message}", e)
-        onAuthError("Erro do Firebase Auth [${e.errorCode}]: ${e.localizedMessage ?: e.message ?: "Falha ao autenticar."}")
+        trace.error("FirebaseExchange(Fallback)", "Fallback FirebaseAuthException [${e.errorCode}]: ${e.message}", e)
+        onAuthFailure(
+            GoogleAuthExceptionHandler.buildReport(
+                throwable = e,
+                deviceContext = deviceContext,
+                traceLines = trace.snapshot(),
+                phase = "FirebaseExchange(Fallback)"
+            )
+        )
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
-        Log.e("Auth", "Fallback Google Sign-In failed", e)
-        onAuthError("Falha ao entrar com Google (${e.javaClass.simpleName}): ${e.localizedMessage ?: e.message ?: "Erro desconhecido."}")
+        trace.error("FallbackGetGoogleId", "Exceção não esperada no fallback", e)
+        onAuthFailure(
+            GoogleAuthExceptionHandler.buildReport(
+                throwable = chooseMoreInformativeThrowable(primaryThrowable, e),
+                deviceContext = deviceContext,
+                traceLines = trace.snapshot(),
+                phase = "FallbackUnexpected"
+            )
+        )
+    }
+}
+
+private fun chooseMoreInformativeThrowable(primary: Throwable, fallback: Throwable): Throwable {
+    val fallbackCat = GoogleAuthExceptionHandler.classify(fallback)
+    val primaryCat = GoogleAuthExceptionHandler.classify(primary)
+    return if (fallbackCat == AuthFailureCategory.USER_CANCELLED && primaryCat == AuthFailureCategory.REAUTH_16) {
+        primary
+    } else {
+        fallback
     }
 }
 
 private suspend fun handleGoogleCredential(
-    cred: androidx.credentials.Credential,
+    cred: Credential,
+    trace: AuthTraceRecorder,
+    deviceContext: AuthDeviceContext,
+    phase: String,
     onAuthSuccess: () -> Unit,
-    onAuthError: (String) -> Unit
+    onAuthFailure: (AuthFailureReport) -> Unit
 ) {
     if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-        val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
+        val googleCred = GoogleIdTokenCredential.createFrom(cred.data)
+        val token = googleCred.idToken
         if (token.isBlank()) {
-            onAuthError("O Google não retornou um token de identificação válido.")
+            trace.error(phase, "GoogleIdTokenCredential veio com idToken vazio.")
+            onAuthFailure(
+                GoogleAuthExceptionHandler.buildReport(
+                    throwable = IllegalStateException("Google ID Token vazio"),
+                    deviceContext = deviceContext,
+                    traceLines = trace.snapshot(),
+                    phase = phase
+                )
+            )
             return
         }
+        trace.info(phase, "ID Token válido recebido (len=${token.length}). Autenticando no Firebase Auth...")
         val result = Firebase.auth
             .signInWithCredential(GoogleAuthProvider.getCredential(token, null))
             .await()
-        if (result.user != null) {
+        val user = result.user
+        if (user != null) {
+            trace.info(phase, "Sessão Firebase criada (uid=${user.uid.take(8)}...).")
             onAuthSuccess()
         } else {
-            onAuthError("Conta Google autenticada, mas o Firebase não criou a sessão do usuário.")
+            trace.error(phase, "signInWithCredential concluiu com user == null.")
+            onAuthFailure(
+                GoogleAuthExceptionHandler.buildReport(
+                    throwable = IllegalStateException("Firebase returned null user after Google credential sign-in"),
+                    deviceContext = deviceContext,
+                    traceLines = trace.snapshot(),
+                    phase = phase
+                )
+            )
         }
     } else {
-        onAuthError("Tipo de credencial inesperado retornado pelo Google (${cred.type}).")
-    }
-}
-
-private fun formatCancellationDiagnostic(context: Context, detail: String): String {
-    val cleanDetail = detail.trim()
-    val isReauth16 = cleanDetail.contains("reauth", ignoreCase = true) || cleanDetail.contains("[16]")
-    val fingerprints = readApkShaFingerprints(context.applicationContext)
-    val buildLabel = if (BuildConfig.DEBUG) "Debug" else "Release"
-    return buildString {
-        append("Login com Google interrompido após selecionar a conta.")
-        if (cleanDetail.isNotBlank()) {
-            append("\nMotivo: $cleanDetail")
-        }
-        append("\nBuild: $buildLabel • Pacote: ${context.packageName}")
-        if (fingerprints.sha1.isNotBlank()) {
-            append("\nSHA-1 deste APK: ${fingerprints.sha1}")
-            if (!fingerprints.matchesRegisteredDebugSha1) {
-                append("\n(Diferente do SHA-1 de debug cadastrado: $REGISTERED_DEBUG_SHA1)")
-            } else {
-                append("\n(SHA-1 igual ao de debug cadastrado; o bloqueio vem da conta/OAuth do projeto no GCP ou Play Services do aparelho)")
-            }
-        }
-        if (isReauth16) {
-            append("\n\nToque em \"Pular login (Testar em modo local)\" logo abaixo para usar o app normalmente com salvamento neste aparelho.")
-        } else {
-            append("\n\nVocê também pode tocar em \"Pular login (Testar em modo local)\" logo abaixo para usar o app neste aparelho.")
-        }
+        trace.error(phase, "Tipo de credencial não suportado: ${cred.type}")
+        onAuthFailure(
+            GoogleAuthExceptionHandler.buildReport(
+                throwable = IllegalStateException("Unexpected credential type: ${cred.type}"),
+                deviceContext = deviceContext,
+                traceLines = trace.snapshot(),
+                phase = phase
+            )
+        )
     }
 }
 
@@ -310,8 +511,9 @@ fun signOutUser(
         withContext(NonCancellable) {
             try {
                 credentialManager.clearCredentialState(ClearCredentialStateRequest())
+                Log.i(AUTH_LOG_TAG, "CredentialManager state cleared on sign-out.")
             } catch (e: Exception) {
-                Log.w("Auth", "Failed to clear credential state: ${e.message}")
+                Log.w(AUTH_LOG_TAG, "Failed to clear credential state: ${e.message}", e)
             } finally {
                 Firebase.auth.signOut()
                 onSignOutComplete()

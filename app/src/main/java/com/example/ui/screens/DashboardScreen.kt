@@ -27,7 +27,10 @@ import androidx.compose.material.icons.rounded.ArrowOutward
 import androidx.compose.material.icons.rounded.Badge
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.Inventory2
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Thermostat
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Button
@@ -55,19 +58,28 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.data.BackupRestoreSummary
+import com.example.data.ChamberTempLog
 import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
 import com.example.data.ReceivingSessionSummary
 import com.example.data.StaffRole
 import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
+import com.example.notifications.ExpiryAlertCalculator
+import com.example.notifications.ExpiryAlertSettings
+import com.example.notifications.ExpiryNotificationManager
+import com.example.ui.components.ChamberTemperatureSheet
+import com.example.ui.components.ExpiryAlertsSheet
 import com.example.ui.components.ExpiryUrgencyBadge
 import com.example.ui.components.ItemDetailSheet
+import com.example.ui.components.LocalBackupSheet
 import com.example.ui.components.MeatTypePill
 import com.example.ui.components.ReceivingSessionDetailSheet
 import com.example.ui.components.StockOutSheet
@@ -100,11 +112,18 @@ fun DashboardScreen(
     isLocalMode: Boolean = false,
     onSwitchToCloudSignIn: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var stockOutTarget by remember { mutableStateOf<ColdStorageItemEntity?>(null) }
     var selectedItem by remember { mutableStateOf<ColdStorageItemEntity?>(null) }
     var selectedSession by remember { mutableStateOf<ReceivingSessionSummary?>(null) }
+    var showChamberTempSheet by remember { mutableStateOf(false) }
+    var showExpiryAlertsSheet by remember { mutableStateOf(false) }
+    var showBackupSheet by remember { mutableStateOf(false) }
+    var alertSettings by remember(context) {
+        mutableStateOf(ExpiryNotificationManager.readSettings(context))
+    }
 
     LaunchedEffect(state.feedbackMessage) {
         state.feedbackMessage?.let { msg ->
@@ -216,6 +235,20 @@ fun DashboardScreen(
                     due15DaysCount = state.due15DaysCount,
                     onTrackCount = state.onTrackCount,
                     onCardClick = { filter -> onNavigateToInventory(filter, null) }
+                )
+            }
+
+            item {
+                DailyOperationalToolsSection(
+                    todayTempLogs = state.todayTempLogs,
+                    latestTempLog = state.latestTempLog,
+                    alertSettings = alertSettings,
+                    urgentItemsCount = state.expiredCount + state.due7DaysCount + state.due15DaysCount,
+                    isLocalMode = isLocalMode,
+                    backupSummary = state.backupSummary,
+                    onOpenChamberTemp = { showChamberTempSheet = true },
+                    onOpenExpiryAlerts = { showExpiryAlertsSheet = true },
+                    onOpenLocalBackup = { showBackupSheet = true }
                 )
             }
 
@@ -400,6 +433,242 @@ fun DashboardScreen(
                 stockOutTarget = null
             }
         )
+    }
+
+    if (showChamberTempSheet) {
+        ChamberTemperatureSheet(
+            logs = state.chamberTempLogs,
+            knownChambers = state.chamberSummaries.map { it.chamberName },
+            defaultResponsibleName = state.sessionState.currentMember?.displayName.orEmpty(),
+            activeRole = state.activeRole,
+            onDismiss = { showChamberTempSheet = false },
+            onRecordRound = { chamber, zone, temp, responsible, notes ->
+                viewModel.recordChamberTemperature(chamber, zone, temp, responsible, notes)
+            },
+            onDeleteRound = { logId ->
+                viewModel.deleteChamberTemperature(logId)
+            }
+        )
+    }
+
+    if (showExpiryAlertsSheet) {
+        val digest = remember(state.activeItems) {
+            ExpiryAlertCalculator.fromItems(state.activeItems)
+        }
+        ExpiryAlertsSheet(
+            digest = digest,
+            initialSettings = alertSettings,
+            onSettingsUpdated = { updated -> alertSettings = updated },
+            onFeedback = { msg -> viewModel.setFeedback(msg) },
+            onDismiss = { showExpiryAlertsSheet = false }
+        )
+    }
+
+    if (showBackupSheet && isLocalMode) {
+        LocalBackupSheet(
+            summary = state.backupSummary,
+            onExportJson = { viewModel.exportLocalBackupJson() },
+            onParseBackup = { raw -> viewModel.parseBackupEnvelope(raw) },
+            onConfirmRestore = { envelope -> viewModel.restoreBackupEnvelope(envelope) },
+            onFeedback = { msg -> viewModel.setFeedback(msg) },
+            onDismiss = { showBackupSheet = false }
+        )
+    }
+}
+
+@Composable
+private fun DailyOperationalToolsSection(
+    todayTempLogs: List<ChamberTempLog>,
+    latestTempLog: ChamberTempLog?,
+    alertSettings: ExpiryAlertSettings,
+    urgentItemsCount: Int,
+    isLocalMode: Boolean,
+    backupSummary: BackupRestoreSummary?,
+    onOpenChamberTemp: () -> Unit,
+    onOpenExpiryAlerts: () -> Unit,
+    onOpenLocalBackup: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlinedCard(
+            onClick = onOpenChamberTemp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("dashboard_chamber_temp_card")
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.size(44.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Rounded.Thermostat,
+                            contentDescription = "Ronda Térmica das Câmaras",
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Ronda Térmica Hoje",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Surface(
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            shape = RoundedCornerShape(999.dp)
+                        ) {
+                            Text(
+                                text = "${todayTempLogs.size} leitura(s)",
+                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    if (latestTempLog != null) {
+                        Text(
+                            text = "Última: ${latestTempLog.chamberName} (${DateUtils.formatShortDate(latestTempLog.recordedAtMillis)})",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        ThermalComplianceBadge(
+                            compliance = latestTempLog.complianceEnum,
+                            tempCelsius = latestTempLog.measuredTempCelsius
+                        )
+                    } else {
+                        Text(
+                            text = "Toque para registrar a temperatura das câmaras e gerar histórico diário.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Text(
+                    text = "Registrar",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.secondary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            OutlinedCard(
+                onClick = onOpenExpiryAlerts,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("dashboard_expiry_alerts_card")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = if (alertSettings.enabled) {
+                            Icons.Rounded.NotificationsActive
+                        } else {
+                            Icons.Rounded.NotificationsOff
+                        },
+                        contentDescription = "Configurar alertas de vencimento",
+                        tint = if (alertSettings.enabled) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Alertas 7d/15d",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = if (alertSettings.enabled) {
+                                "Diário ${String.format(Locale.US, "%02d:%02d", alertSettings.hour, alertSettings.minute)}"
+                            } else if (urgentItemsCount > 0) {
+                                "$urgentItemsCount lote(s) em atenção"
+                            } else {
+                                "Ativar avisos"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            if (isLocalMode) {
+                OutlinedCard(
+                    onClick = onOpenLocalBackup,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("dashboard_local_backup_card")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Save,
+                            contentDescription = "Backup e restauração JSON local",
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Backup JSON",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = if (backupSummary != null && backupSummary.exportedAtMillis > 0L) {
+                                    "Salvo ${DateUtils.formatShortDate(backupSummary.exportedAtMillis)}"
+                                } else {
+                                    "Salvar / Restaurar"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

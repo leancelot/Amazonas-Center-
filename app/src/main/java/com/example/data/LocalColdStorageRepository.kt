@@ -15,8 +15,28 @@ import java.io.File
 import java.util.UUID
 
 @Serializable
-private data class LocalSessionDto(
-    val id: String,
+data class LocalColdStorageBackupEnvelope(
+    val schemaVersion: Int = 1,
+    val appId: String = "com.aistudio.frigstock.krmvqt",
+    val exportedAtMillis: Long = System.currentTimeMillis(),
+    val activeRole: String = StaffRole.GERENTE.name,
+    val sessions: List<LocalSessionDto> = emptyList(),
+    val items: List<LocalItemDto> = emptyList(),
+    val movements: List<LocalMovementDto> = emptyList(),
+    val temperatureLogs: List<ChamberTempLog> = emptyList()
+)
+
+data class BackupRestoreSummary(
+    val sessionCount: Int,
+    val itemCount: Int,
+    val movementCount: Int,
+    val temperatureLogCount: Int,
+    val exportedAtMillis: Long
+)
+
+@Serializable
+data class LocalSessionDto(
+    val id: String = "",
     val invoiceNumber: String = "",
     val accessKey: String = "",
     val supplierName: String = "",
@@ -33,8 +53,8 @@ private data class LocalSessionDto(
 )
 
 @Serializable
-private data class LocalItemDto(
-    val id: String,
+data class LocalItemDto(
+    val id: String = "",
     val sessionId: String = "",
     val meatType: String = MeatType.BOVINA.name,
     val cutName: String = "",
@@ -55,8 +75,8 @@ private data class LocalItemDto(
 )
 
 @Serializable
-private data class LocalMovementDto(
-    val id: String,
+data class LocalMovementDto(
+    val id: String = "",
     val createdByName: String = "Teste Local",
     val itemId: String = "",
     val cutNameSnapshot: String = "",
@@ -78,18 +98,27 @@ private data class LocalColdStorageSnapshot(
 )
 
 class LocalColdStorageRepository(
-    context: Context
+    context: Context,
+    private val chamberTempLogStore: ChamberTempLogStore? = null
 ) : ColdStorageRepository {
 
     private val appContext = context.applicationContext
     private val storageFile = File(appContext.filesDir, "local_frigstock_test_data.json")
+    private val backupPrefs = appContext.getSharedPreferences(BACKUP_PREFS_NAME, Context.MODE_PRIVATE)
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
     }
+    private val backupJson = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+        prettyPrint = true
+    }
     private val mutex = Mutex()
 
     private val _snapshot = MutableStateFlow(loadInitialSnapshot())
+    private val _lastBackupAtMillis = MutableStateFlow(backupPrefs.getLong(KEY_LAST_BACKUP_AT, 0L))
+    val lastBackupAtMillis: kotlinx.coroutines.flow.StateFlow<Long> = _lastBackupAtMillis
 
     override val sessionState: Flow<ShopSessionState> = _snapshot.map { snap ->
         val role = StaffRole.fromRaw(snap.activeRole)
@@ -392,6 +421,138 @@ class LocalColdStorageRepository(
         mutex.withLock {
             persistLocked(LocalColdStorageSnapshot(activeRole = _snapshot.value.activeRole))
         }
+        chamberTempLogStore?.clearAll()
+    }
+
+    suspend fun exportBackupJson(): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val snap = mutex.withLock { _snapshot.value }
+            val tempLogs = chamberTempLogStore?.currentSnapshot().orEmpty()
+            val now = System.currentTimeMillis()
+            val envelope = LocalColdStorageBackupEnvelope(
+                schemaVersion = 1,
+                appId = appContext.packageName,
+                exportedAtMillis = now,
+                activeRole = snap.activeRole,
+                sessions = snap.sessions,
+                items = snap.items,
+                movements = snap.movements,
+                temperatureLogs = tempLogs
+            )
+            val encoded = backupJson.encodeToString(LocalColdStorageBackupEnvelope.serializer(), envelope)
+            recordBackupTimestamp(now)
+            encoded
+        }
+    }
+
+    fun parseBackupEnvelope(rawJson: String): Result<LocalColdStorageBackupEnvelope> {
+        return runCatching {
+            val trimmed = rawJson.trim()
+            require(trimmed.startsWith("{")) {
+                "Arquivo inválido: o backup deve estar em formato JSON."
+            }
+            val parsed = json.decodeFromString(LocalColdStorageBackupEnvelope.serializer(), trimmed)
+            val hasAnyRecognizedField = parsed.sessions.isNotEmpty() ||
+                parsed.items.isNotEmpty() ||
+                parsed.movements.isNotEmpty() ||
+                parsed.temperatureLogs.isNotEmpty() ||
+                trimmed.contains("\"sessions\"") ||
+                trimmed.contains("\"items\"")
+            require(hasAnyRecognizedField) {
+                "Este arquivo JSON não contém dados válidos do Amazonas Center."
+            }
+            parsed
+        }
+    }
+
+    suspend fun restoreFromBackupEnvelope(envelope: LocalColdStorageBackupEnvelope): Result<BackupRestoreSummary> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val safeSessions = envelope.sessions
+                    .filter { it.id.isNotBlank() || it.supplierName.isNotBlank() || it.invoiceNumber.isNotBlank() }
+                    .map { s ->
+                        s.copy(
+                            id = s.id.ifBlank { newId() },
+                            measuredTempCelsius = s.measuredTempCelsius.coerceIn(-50.0, 50.0),
+                            targetZone = TemperatureZone.fromRaw(s.targetZone).name,
+                            sourceType = InvoiceSourceType.fromRaw(s.sourceType).name,
+                            itemCount = s.itemCount.coerceAtLeast(0),
+                            totalKg = s.totalKg.coerceAtLeast(0.0)
+                        )
+                    }
+                    .distinctBy { it.id }
+
+                val safeItems = envelope.items
+                    .filter { it.cutName.isNotBlank() || it.id.isNotBlank() }
+                    .map { item ->
+                        val zone = TemperatureZone.fromRaw(item.temperatureZone)
+                        item.copy(
+                            id = item.id.ifBlank { newId() },
+                            meatType = MeatType.fromRaw(item.meatType).name,
+                            cutName = item.cutName.ifBlank { "Corte Diverso" }.take(120),
+                            temperatureZone = zone.name,
+                            measuredTempCelsius = item.measuredTempCelsius.coerceIn(-50.0, 50.0),
+                            chamberName = item.chamberName.ifBlank { zone.defaultChamber }.take(80),
+                            initialQuantity = item.initialQuantity.coerceAtLeast(0.0),
+                            currentQuantity = item.currentQuantity.coerceAtLeast(0.0),
+                            unit = MeasurementUnit.fromRaw(item.unit).name,
+                            unitCostBrl = item.unitCostBrl.coerceAtLeast(0.0)
+                        )
+                    }
+                    .distinctBy { it.id }
+
+                val safeMovements = envelope.movements
+                    .filter { it.itemId.isNotBlank() || it.cutNameSnapshot.isNotBlank() }
+                    .map { mov ->
+                        mov.copy(
+                            id = mov.id.ifBlank { newId() },
+                            meatTypeSnapshot = MeatType.fromRaw(mov.meatTypeSnapshot).name,
+                            unitSnapshot = MeasurementUnit.fromRaw(mov.unitSnapshot).name,
+                            movementType = MovementType.fromRaw(mov.movementType).name,
+                            quantity = mov.quantity.coerceAtLeast(0.0),
+                            estimatedLossBrl = mov.estimatedLossBrl.coerceAtLeast(0.0)
+                        )
+                    }
+                    .distinctBy { it.id }
+
+                val restoredSnapshot = LocalColdStorageSnapshot(
+                    activeRole = StaffRole.fromRaw(envelope.activeRole).name,
+                    sessions = safeSessions,
+                    items = safeItems,
+                    movements = safeMovements
+                )
+
+                mutex.withLock {
+                    persistLocked(restoredSnapshot)
+                }
+                chamberTempLogStore?.replaceAll(envelope.temperatureLogs)
+                recordBackupTimestamp(System.currentTimeMillis())
+
+                BackupRestoreSummary(
+                    sessionCount = safeSessions.size,
+                    itemCount = safeItems.size,
+                    movementCount = safeMovements.size,
+                    temperatureLogCount = envelope.temperatureLogs.size,
+                    exportedAtMillis = envelope.exportedAtMillis
+                )
+            }
+        }
+
+    fun snapshotCounts(): BackupRestoreSummary {
+        val snap = _snapshot.value
+        val tempCount = chamberTempLogStore?.currentSnapshot()?.size ?: 0
+        return BackupRestoreSummary(
+            sessionCount = snap.sessions.size,
+            itemCount = snap.items.size,
+            movementCount = snap.movements.size,
+            temperatureLogCount = tempCount,
+            exportedAtMillis = _lastBackupAtMillis.value
+        )
+    }
+
+    private fun recordBackupTimestamp(millis: Long) {
+        _lastBackupAtMillis.value = millis
+        backupPrefs.edit().putLong(KEY_LAST_BACKUP_AT, millis).apply()
     }
 
     private fun loadInitialSnapshot(): LocalColdStorageSnapshot {
@@ -465,5 +626,7 @@ class LocalColdStorageRepository(
         private const val LOCAL_USER_ID = "local_tester"
         private const val LOCAL_USER_EMAIL = "teste.local@aparelho"
         private const val LOCAL_USER_NAME = "Teste Local"
+        private const val BACKUP_PREFS_NAME = "frigstock_local_backup_prefs"
+        private const val KEY_LAST_BACKUP_AT = "last_backup_at_millis"
     }
 }

@@ -1,12 +1,18 @@
 package com.example.ui.viewmodel
 
+import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.BackupRestoreSummary
+import com.example.data.ChamberTempLog
+import com.example.data.ChamberTempLogStore
 import com.example.data.ColdStorageItemEntity
 import com.example.data.ColdStorageRepository
 import com.example.data.DateUtils
 import com.example.data.ExpiryUrgency
+import com.example.data.LocalColdStorageBackupEnvelope
+import com.example.data.LocalColdStorageRepository
 import com.example.data.MeasurementUnit
 import com.example.data.MovementType
 import com.example.data.ReceivingSessionSummary
@@ -14,6 +20,7 @@ import com.example.data.ShopSessionState
 import com.example.data.StaffRole
 import com.example.data.StockMovementEntity
 import com.example.data.TemperatureZone
+import com.example.notifications.ExpiryNotificationManager
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -38,6 +45,10 @@ data class DashboardUiState(
     val priorityFefoItems: List<ColdStorageItemEntity> = emptyList(),
     val todaySessions: List<ReceivingSessionSummary> = emptyList(),
     val chamberSummaries: List<ChamberSummary> = emptyList(),
+    val chamberTempLogs: List<ChamberTempLog> = emptyList(),
+    val todayTempLogs: List<ChamberTempLog> = emptyList(),
+    val latestTempLog: ChamberTempLog? = null,
+    val backupSummary: BackupRestoreSummary? = null,
     val totalKg: Double = 0.0,
     val totalOtherUnits: Int = 0,
     val activeLotCount: Int = 0,
@@ -53,17 +64,36 @@ data class DashboardUiState(
 }
 
 class DashboardViewModel(
-    private val repository: ColdStorageRepository
+    private val repository: ColdStorageRepository,
+    private val chamberTempLogStore: ChamberTempLogStore? = null,
+    private val appContext: Context? = null
 ) : ViewModel() {
 
     private val _feedback = MutableStateFlow<String?>(null)
+    private val emptyTempLogsFlow = MutableStateFlow<List<ChamberTempLog>>(emptyList())
+    private val tempLogsFlow: StateFlow<List<ChamberTempLog>> =
+        chamberTempLogStore?.logs ?: emptyTempLogsFlow
 
-    val uiState: StateFlow<DashboardUiState> = combine(
+    private val emptyBackupTimeFlow = MutableStateFlow(0L)
+    private val lastBackupTimeFlow: StateFlow<Long> =
+        (repository as? LocalColdStorageRepository)?.lastBackupAtMillis ?: emptyBackupTimeFlow
+
+    private val baseDataFlow = combine(
         repository.activeItemsFefo,
         repository.sessionSummaries,
-        repository.sessionState,
+        repository.sessionState
+    ) { items, sessions, session ->
+        Triple(items, sessions, session)
+    }
+
+    val uiState: StateFlow<DashboardUiState> = combine(
+        baseDataFlow,
+        tempLogsFlow,
+        lastBackupTimeFlow,
         _feedback
-    ) { items, sessions, session, feedback ->
+    ) { (items, sessions, session), tempLogs, lastBackupMillis, feedback ->
+        appContext?.let { ExpiryNotificationManager.updateCachedLots(it, items) }
+
         val totalKg = items.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.currentQuantity }
         val otherUnits = items.filter { it.unitEnum != MeasurementUnit.KG }.sumOf { it.currentQuantity.toInt() }
         val expiredCount = items.count { it.urgency == ExpiryUrgency.VENCIDO }
@@ -76,6 +106,8 @@ class DashboardViewModel(
         val todaySessions = sessions
             .filter { DateUtils.isToday(it.receivedAtMillis) }
             .distinctBy { it.id }
+
+        val todayTempLogs = tempLogs.filter { DateUtils.isToday(it.recordedAtMillis) }
 
         val chamberSummaries = items
             .groupBy { it.chamberName.ifBlank { it.zoneEnum.defaultChamber } }
@@ -107,11 +139,21 @@ class DashboardViewModel(
             }
             .sortedByDescending { it.lotCount }
 
+        val backupSummary = (repository as? LocalColdStorageRepository)?.snapshotCounts()
+            ?.copy(
+                temperatureLogCount = tempLogs.size,
+                exportedAtMillis = lastBackupMillis
+            )
+
         DashboardUiState(
             activeItems = items,
             priorityFefoItems = items.take(8),
             todaySessions = todaySessions,
             chamberSummaries = chamberSummaries,
+            chamberTempLogs = tempLogs,
+            todayTempLogs = todayTempLogs,
+            latestTempLog = tempLogs.firstOrNull(),
+            backupSummary = backupSummary,
             totalKg = totalKg,
             totalOtherUnits = otherUnits,
             activeLotCount = items.size,
@@ -150,6 +192,70 @@ class DashboardViewModel(
             Log.w("DashboardVM", "Error observing item movements", rootError)
             emit(emptyList())
         }
+
+    fun recordChamberTemperature(
+        chamberName: String,
+        zone: TemperatureZone,
+        measuredTempCelsius: Double,
+        responsibleName: String,
+        notes: String
+    ) {
+        val store = chamberTempLogStore ?: return
+        viewModelScope.launch {
+            store.recordRound(
+                chamberName = chamberName,
+                zone = zone,
+                measuredTempCelsius = measuredTempCelsius,
+                recordedByName = responsibleName.ifBlank {
+                    uiState.value.sessionState.currentMember?.displayName.orEmpty()
+                },
+                notes = notes
+            ).fold(
+                onSuccess = { entry ->
+                    _feedback.value = "Ronda registrada: ${entry.chamberName} (${DateUtils.formatTemp(entry.measuredTempCelsius)} • ${entry.complianceEnum.displayName})."
+                },
+                onFailure = { err ->
+                    _feedback.value = err.localizedMessage ?: "Erro ao registrar temperatura da câmara."
+                }
+            )
+        }
+    }
+
+    fun deleteChamberTemperature(logId: String) {
+        val store = chamberTempLogStore ?: return
+        viewModelScope.launch {
+            store.deleteRound(logId).fold(
+                onSuccess = { _feedback.value = "Registro térmico removido." },
+                onFailure = { err -> _feedback.value = err.localizedMessage ?: "Erro ao remover registro térmico." }
+            )
+        }
+    }
+
+    suspend fun exportLocalBackupJson(): Result<String> {
+        val localRepo = repository as? LocalColdStorageRepository
+            ?: return Result.failure(IllegalStateException("Backup JSON disponível no Modo Local."))
+        return localRepo.exportBackupJson()
+    }
+
+    fun parseBackupEnvelope(rawJson: String): Result<LocalColdStorageBackupEnvelope> {
+        val localRepo = repository as? LocalColdStorageRepository
+            ?: return Result.failure(IllegalStateException("Restauração JSON disponível no Modo Local."))
+        return localRepo.parseBackupEnvelope(rawJson)
+    }
+
+    fun restoreBackupEnvelope(envelope: LocalColdStorageBackupEnvelope) {
+        val localRepo = repository as? LocalColdStorageRepository ?: return
+        viewModelScope.launch {
+            localRepo.restoreFromBackupEnvelope(envelope).fold(
+                onSuccess = { summary ->
+                    _feedback.value = "Backup restaurado: ${summary.sessionCount} sessão(ões), ${summary.itemCount} corte(s) e ${summary.temperatureLogCount} ronda(s)."
+                },
+                onFailure = { err ->
+                    _feedback.value = err.localizedMessage ?: "Não foi possível restaurar o backup JSON."
+                }
+            )
+        }
+    }
 
     fun recordStockOut(
         itemId: String,
@@ -228,6 +334,10 @@ class DashboardViewModel(
                 }
             )
         }
+    }
+
+    fun setFeedback(message: String) {
+        _feedback.value = message
     }
 
     fun clearFeedback() {

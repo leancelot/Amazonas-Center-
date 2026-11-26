@@ -6,6 +6,8 @@ import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.ChamberTempLog
+import com.example.data.ChamberTempLogStore
 import com.example.data.ColdStorageItemEntity
 import com.example.data.ColdStorageRepository
 import com.example.data.DateUtils
@@ -87,23 +89,29 @@ data class ReportsUiState(
     val zoneBreakdown: List<ZoneStockBreakdown> = emptyList(),
     val lossReasons: List<LossReasonBreakdown> = emptyList(),
     val recentMovements: List<StockMovementEntity> = emptyList(),
+    val recentTempLogs: List<ChamberTempLog> = emptyList(),
+    val todayTempRoundsCount: Int = 0,
     val activeItemsSnapshot: List<ColdStorageItemEntity> = emptyList(),
     val streamError: String? = null
 )
 
 class ReportsViewModel(
-    private val repository: ColdStorageRepository
+    private val repository: ColdStorageRepository,
+    private val chamberTempLogStore: ChamberTempLogStore? = null
 ) : ViewModel() {
 
     private val _period = MutableStateFlow(ReportPeriod.DAYS_30)
     private val _stockGrouping = MutableStateFlow(ReportStockGrouping.MEAT_TYPE)
+    private val emptyTempLogs = MutableStateFlow<List<ChamberTempLog>>(emptyList())
+    private val tempLogsFlow: StateFlow<List<ChamberTempLog>> = chamberTempLogStore?.logs ?: emptyTempLogs
 
     val uiState: StateFlow<ReportsUiState> = combine(
         repository.activeItemsFefo,
         repository.allMovements,
+        tempLogsFlow,
         _period,
         _stockGrouping
-    ) { activeItems, allMovements, period, grouping ->
+    ) { activeItems, allMovements, tempLogs, period, grouping ->
         val cutoffMillis = period.days?.let { days ->
             System.currentTimeMillis() - (days.toLong() * 86_400_000L)
         } ?: 0L
@@ -190,6 +198,9 @@ class ReportsViewModel(
             }
             .sortedByDescending { it.totalKg }
 
+        val periodTempLogs = tempLogs.filter { it.recordedAtMillis >= cutoffMillis }
+        val todayTempRounds = tempLogs.count { DateUtils.isToday(it.recordedAtMillis) }
+
         ReportsUiState(
             period = period,
             stockGrouping = grouping,
@@ -206,6 +217,8 @@ class ReportsViewModel(
             zoneBreakdown = zoneGroups,
             lossReasons = lossByReason,
             recentMovements = periodMovements.take(30),
+            recentTempLogs = periodTempLogs.take(15),
+            todayTempRoundsCount = todayTempRounds,
             activeItemsSnapshot = activeItems
         )
     }.catch { error ->
@@ -273,6 +286,13 @@ class ReportsViewModel(
             sb.appendLine("DETALHAMENTO DE PERDAS:")
             state.lossReasons.forEach {
                 sb.appendLine("- ${it.movementType.displayName}: ${String.format(ptBr, "%.2f", it.totalKg)} kg (${it.count}x)")
+            }
+        }
+        if (state.recentTempLogs.isNotEmpty()) {
+            sb.appendLine()
+            sb.appendLine("RONDAS TÉRMICAS (${state.todayTempRoundsCount} hoje):")
+            state.recentTempLogs.take(8).forEach { log ->
+                sb.appendLine("- ${log.chamberName}: ${DateUtils.formatTemp(log.measuredTempCelsius)} (${log.complianceEnum.displayName}) em ${DateUtils.formatShortDate(log.recordedAtMillis)}")
             }
         }
         return sb.toString()

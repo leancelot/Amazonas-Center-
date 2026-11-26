@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.DateUtils
+import com.example.ui.components.ThermalComplianceBadge
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.StatusWarningAmber
 import com.example.ui.viewmodel.ReportPeriod
@@ -315,6 +316,50 @@ fun ReportsScreen(
                                         style = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFamily),
                                         color = MaterialTheme.colorScheme.error,
                                         fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (state.recentTempLogs.isNotEmpty()) {
+                item {
+                    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "Rondas Térmicas Recentes (${state.todayTempRoundsCount} hoje)",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            state.recentTempLogs.take(5).forEach { log ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = log.chamberName,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = buildString {
+                                                append(DateUtils.formatShortDate(log.recordedAtMillis))
+                                                if (log.recordedByName.isNotBlank()) append(" • ${log.recordedByName}")
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    ThermalComplianceBadge(
+                                        compliance = log.complianceEnum,
+                                        tempCelsius = log.measuredTempCelsius
                                     )
                                 }
                             }
