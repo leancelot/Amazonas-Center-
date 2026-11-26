@@ -19,6 +19,8 @@ import com.example.data.ThermalCompliance
 import com.example.domain.invoice.DanfeQrParser
 import com.example.domain.invoice.InvoiceAiExtractor
 import com.example.domain.invoice.InvoiceLocalExtractor
+import com.example.domain.invoice.LocalInvoiceOcrParser
+import com.example.domain.invoice.LocalOcrSnapshot
 import com.example.domain.invoice.NfeXmlParser
 import com.example.domain.invoice.ParsedInvoiceDraft
 import com.example.domain.invoice.ParsedInvoiceItemDraft
@@ -52,7 +54,8 @@ sealed interface ExtractionUiState {
         val message: String,
         val rawOcrText: String = "",
         val canRetryWithCloud: Boolean = false,
-        val canRetryFullVision: Boolean = false
+        val canRetryFullVision: Boolean = false,
+        val canUseOfflineFallback: Boolean = false
     ) : ExtractionUiState
 }
 
@@ -100,6 +103,7 @@ class ReceivingViewModel(
     private var lastMediaUri: Uri? = null
     private var lastMediaIsPdf: Boolean = false
     private var lastRawOcrText: String = ""
+    private var lastOcrSnapshot: LocalOcrSnapshot? = null
     private val saveMutex = Mutex()
     private var lastSavedFingerprint: String? = null
     private var lastSavedAtMillis: Long = 0L
@@ -222,6 +226,7 @@ class ReceivingViewModel(
         _formState.value = ReceivingFormState(responsibleName = keepResponsible)
         lastMediaUri = null
         lastRawOcrText = ""
+        lastOcrSnapshot = null
         _extractionState.value = ExtractionUiState.Idle
         return true
     }
@@ -348,10 +353,12 @@ class ReceivingViewModel(
     fun extractFastAiFromImageUri(context: Context, uri: Uri) {
         lastMediaUri = uri
         lastMediaIsPdf = false
+        lastOcrSnapshot = null
         viewModelScope.launch {
             val startedAt = System.currentTimeMillis()
             _extractionState.value = ExtractionUiState.Loading("1/2 Capturando texto da foto no aparelho...")
             val snapshot = localExtractor.extractSnapshotFromImageUri(context, uri).getOrNull()
+            lastOcrSnapshot = snapshot
             val ocrText = snapshot?.reconstructedText.orEmpty()
             lastRawOcrText = ocrText
 
@@ -378,6 +385,17 @@ class ReceivingViewModel(
                     )
                     return@launch
                 }
+
+                val textErr = textAiResult.exceptionOrNull()
+                if (aiExtractor.isAppCheckFailure(textErr)) {
+                    _extractionState.value = ExtractionUiState.Error(
+                        message = textErr?.localizedMessage ?: "Falha na validação App Check da IA na nuvem.",
+                        rawOcrText = ocrText,
+                        canRetryWithCloud = true,
+                        canUseOfflineFallback = true
+                    )
+                    return@launch
+                }
             }
 
             // Fallback to compact JPEG upload when OCR is sparse (handwriting / low contrast)
@@ -398,10 +416,12 @@ class ReceivingViewModel(
                     )
                 },
                 onFailure = { err ->
+                    val appCheckErr = aiExtractor.isAppCheckFailure(err)
                     _extractionState.value = ExtractionUiState.Error(
                         message = err.localizedMessage ?: "Não foi possível consultar a IA na nuvem.",
                         rawOcrText = ocrText,
-                        canRetryFullVision = true
+                        canRetryFullVision = !appCheckErr,
+                        canUseOfflineFallback = true
                     )
                 }
             )
@@ -411,10 +431,12 @@ class ReceivingViewModel(
     fun extractFastAiFromPdfUri(context: Context, uri: Uri) {
         lastMediaUri = uri
         lastMediaIsPdf = true
+        lastOcrSnapshot = null
         viewModelScope.launch {
             val startedAt = System.currentTimeMillis()
             _extractionState.value = ExtractionUiState.Loading("1/2 Extraindo texto das páginas do PDF...")
             val snapshot = localExtractor.extractSnapshotFromPdfUri(context, uri).getOrNull()
+            lastOcrSnapshot = snapshot
             val ocrText = snapshot?.reconstructedText.orEmpty()
             lastRawOcrText = ocrText
 
@@ -441,6 +463,17 @@ class ReceivingViewModel(
                     )
                     return@launch
                 }
+
+                val textErr = textAiResult.exceptionOrNull()
+                if (aiExtractor.isAppCheckFailure(textErr)) {
+                    _extractionState.value = ExtractionUiState.Error(
+                        message = textErr?.localizedMessage ?: "Falha na validação App Check da IA na nuvem.",
+                        rawOcrText = ocrText,
+                        canRetryWithCloud = true,
+                        canUseOfflineFallback = true
+                    )
+                    return@launch
+                }
             }
 
             _extractionState.value = ExtractionUiState.Loading("Enviando PDF para leitura visual por IA...")
@@ -460,13 +493,84 @@ class ReceivingViewModel(
                     )
                 },
                 onFailure = { err ->
+                    val appCheckErr = aiExtractor.isAppCheckFailure(err)
                     _extractionState.value = ExtractionUiState.Error(
                         message = err.localizedMessage ?: "Não foi possível ler o PDF com IA.",
                         rawOcrText = ocrText,
-                        canRetryFullVision = true
+                        canRetryFullVision = !appCheckErr,
+                        canUseOfflineFallback = true
                     )
                 }
             )
+        }
+    }
+
+    fun useOfflineFallbackForLastMedia(context: Context) {
+        val snapshot = lastOcrSnapshot
+        val rawText = lastRawOcrText
+        val mediaUri = lastMediaUri
+        val isPdf = lastMediaIsPdf
+        val sourceType = if (isPdf) InvoiceSourceType.OCR_PDF else InvoiceSourceType.OCR_FOTO
+
+        if (snapshot != null && snapshot.reconstructedText.isNotBlank()) {
+            viewModelScope.launch {
+                val startedAt = System.currentTimeMillis()
+                _extractionState.value = ExtractionUiState.Loading("Processando texto reconhecido offline...")
+                val result = LocalInvoiceOcrParser.parsePages(snapshot.pages, sourceType)
+                val elapsed = formatElapsedSeconds(startedAt)
+                result.fold(
+                    onSuccess = { draft ->
+                        applyParsedDraft(draft, replaceItems = false)
+                        val warning = checkThermalConsistency(
+                            draft.items,
+                            draft.extractedTempCelsius ?: _formState.value.parsedTempCelsius,
+                            draft.items.firstOrNull()?.temperatureZone ?: _formState.value.targetZone
+                        )
+                        _extractionState.value = ExtractionUiState.Success(
+                            message = buildLocalSuccessMessage("Nota lida offline ($elapsed)", draft, warning),
+                            rawOcrText = draft.rawOcrText,
+                            canRetryWithCloud = true
+                        )
+                    },
+                    onFailure = { err ->
+                        _extractionState.value = ExtractionUiState.Error(
+                            message = err.localizedMessage ?: "Não foi possível extrair os dados offline.",
+                            rawOcrText = rawText
+                        )
+                    }
+                )
+            }
+            return
+        }
+
+        if (rawText.isNotBlank()) {
+            viewModelScope.launch {
+                val startedAt = System.currentTimeMillis()
+                _extractionState.value = ExtractionUiState.Loading("Estruturando texto offline no aparelho...")
+                val result = LocalInvoiceOcrParser.parseRawText(rawText, sourceType)
+                val elapsed = formatElapsedSeconds(startedAt)
+                result.fold(
+                    onSuccess = { draft ->
+                        applyParsedDraft(draft, replaceItems = false)
+                        _extractionState.value = ExtractionUiState.Success(
+                            message = buildLocalSuccessMessage("Nota lida offline ($elapsed)", draft, null),
+                            rawOcrText = rawText,
+                            canRetryWithCloud = true
+                        )
+                    },
+                    onFailure = { err ->
+                        _extractionState.value = ExtractionUiState.Error(
+                            message = err.localizedMessage ?: "Não foi possível extrair os dados offline.",
+                            rawOcrText = rawText
+                        )
+                    }
+                )
+            }
+            return
+        }
+
+        if (mediaUri != null) {
+            if (isPdf) extractFromPdfUri(context, mediaUri) else extractFromImageUri(context, mediaUri)
         }
     }
 
@@ -489,10 +593,13 @@ class ReceivingViewModel(
                         )
                     },
                     onFailure = { err ->
+                        val appCheckErr = aiExtractor.isAppCheckFailure(err)
                         _extractionState.value = ExtractionUiState.Error(
                             message = err.localizedMessage ?: "Não foi possível consultar a IA na nuvem.",
                             rawOcrText = ocrText,
-                            canRetryFullVision = lastMediaUri != null
+                            canRetryWithCloud = true,
+                            canRetryFullVision = !appCheckErr && lastMediaUri != null,
+                            canUseOfflineFallback = true
                         )
                     }
                 )
@@ -525,10 +632,12 @@ class ReceivingViewModel(
                     )
                 },
                 onFailure = { err ->
+                    val appCheckErr = aiExtractor.isAppCheckFailure(err)
                     _extractionState.value = ExtractionUiState.Error(
                         message = err.localizedMessage ?: "Não foi possível consultar a IA na nuvem.",
                         rawOcrText = lastRawOcrText,
-                        canRetryFullVision = true
+                        canRetryFullVision = !appCheckErr,
+                        canUseOfflineFallback = true
                     )
                 }
             )

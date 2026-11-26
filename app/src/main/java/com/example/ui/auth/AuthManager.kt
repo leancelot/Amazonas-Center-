@@ -11,7 +11,10 @@ import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.credentials.exceptions.GetCredentialException
 import androidx.credentials.exceptions.NoCredentialException
+import com.example.BuildConfig
 import com.example.R
+import com.example.ai.REGISTERED_DEBUG_SHA1
+import com.example.ai.readApkShaFingerprints
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
@@ -160,7 +163,7 @@ fun onGoogleSignInClicked(
                     onAuthCancelled = onAuthCancelled
                 )
             } else {
-                onAuthCancelled(formatCancellationDiagnostic(primaryDetail))
+                onAuthCancelled(formatCancellationDiagnostic(activityContext, primaryDetail))
             }
         } catch (e: NoCredentialException) {
             Log.w("Auth", "No Google credentials found with SignInWithGoogleOption: ${e.errorMessage ?: e.message}", e)
@@ -222,10 +225,10 @@ private suspend fun tryGoogleIdFallback(
     } catch (fallbackCancel: GetCredentialCancellationException) {
         val fallbackDetail = (fallbackCancel.errorMessage?.toString() ?: fallbackCancel.message).orEmpty()
         Log.w("Auth", "Fallback Google Sign-In cancelled: $fallbackDetail", fallbackCancel)
-        onAuthCancelled(formatCancellationDiagnostic(fallbackDetail.ifBlank { primaryDetail }))
+        onAuthCancelled(formatCancellationDiagnostic(activityContext, fallbackDetail.ifBlank { primaryDetail }))
     } catch (fallbackNoCred: NoCredentialException) {
         Log.w("Auth", "Fallback NoCredentialException: ${fallbackNoCred.errorMessage ?: fallbackNoCred.message}", fallbackNoCred)
-        onAuthCancelled(formatCancellationDiagnostic(primaryDetail.ifBlank { fallbackNoCred.message.orEmpty() }))
+        onAuthCancelled(formatCancellationDiagnostic(activityContext, primaryDetail.ifBlank { fallbackNoCred.message.orEmpty() }))
     } catch (fallbackCred: GetCredentialException) {
         Log.e("Auth", "Fallback CredentialException [${fallbackCred.type}]: ${fallbackCred.errorMessage ?: fallbackCred.message}", fallbackCred)
         val detail = (fallbackCred.errorMessage?.toString() ?: fallbackCred.message).orEmpty().ifBlank { primaryDetail }
@@ -271,18 +274,29 @@ private suspend fun handleGoogleCredential(
     }
 }
 
-private fun formatCancellationDiagnostic(detail: String): String {
+private fun formatCancellationDiagnostic(context: Context, detail: String): String {
     val cleanDetail = detail.trim()
     val isReauth16 = cleanDetail.contains("reauth", ignoreCase = true) || cleanDetail.contains("[16]")
+    val fingerprints = readApkShaFingerprints(context.applicationContext)
+    val buildLabel = if (BuildConfig.DEBUG) "Debug" else "Release"
     return buildString {
         append("Login com Google interrompido após selecionar a conta.")
         if (cleanDetail.isNotBlank()) {
             append("\nMotivo: $cleanDetail")
         }
+        append("\nBuild: $buildLabel • Pacote: ${context.packageName}")
+        if (fingerprints.sha1.isNotBlank()) {
+            append("\nSHA-1 deste APK: ${fingerprints.sha1}")
+            if (!fingerprints.matchesRegisteredDebugSha1) {
+                append("\n(Diferente do SHA-1 de debug cadastrado: $REGISTERED_DEBUG_SHA1)")
+            } else {
+                append("\n(SHA-1 igual ao de debug cadastrado; o bloqueio vem da conta/OAuth do projeto no GCP ou Play Services do aparelho)")
+            }
+        }
         if (isReauth16) {
-            append("\n\nEsse erro [16] ocorre no Google Play Services do aparelho quando a conta Google exige revalidação ou o login OAuth é bloqueado no dispositivo. Enquanto isso, você pode tocar em \"Pular login (Testar em modo local)\" logo abaixo para usar o app normalmente no celular.")
+            append("\n\nToque em \"Pular login (Testar em modo local)\" logo abaixo para usar o app normalmente com salvamento neste aparelho.")
         } else {
-            append("\n\nVocê também pode tocar em \"Pular login (Testar em modo local)\" logo abaixo para testar todo o app neste aparelho.")
+            append("\n\nVocê também pode tocar em \"Pular login (Testar em modo local)\" logo abaixo para usar o app neste aparelho.")
         }
     }
 }

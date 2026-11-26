@@ -7,6 +7,7 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
 import android.util.Log
+import com.example.ai.inspectAppCheckTokenDiagnostic
 import com.example.data.DateUtils
 import com.example.data.InvoiceSourceType
 import com.google.firebase.Firebase
@@ -120,7 +121,7 @@ class InvoiceAiExtractor {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "AI image extraction failed", e)
-            Result.failure(IllegalStateException(formatAiFailureMessage("Falha na leitura por IA", e)))
+            Result.failure(IllegalStateException(formatAiFailureMessage("Falha na leitura por IA", e, context)))
         }
     }
 
@@ -156,7 +157,7 @@ class InvoiceAiExtractor {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "AI PDF extraction failed", e)
-            Result.failure(IllegalStateException(formatAiFailureMessage("Falha ao ler PDF com IA", e)))
+            Result.failure(IllegalStateException(formatAiFailureMessage("Falha ao ler PDF com IA", e, context)))
         }
     }
 
@@ -190,7 +191,7 @@ class InvoiceAiExtractor {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "AI text extraction failed", e)
-            Result.failure(IllegalStateException(formatAiFailureMessage("Falha na estruturação por IA", e)))
+            Result.failure(IllegalStateException(formatAiFailureMessage("Falha na estruturação por IA", e, context)))
         }
     }
 
@@ -248,21 +249,32 @@ class InvoiceAiExtractor {
             msg.contains("RESOURCE_EXHAUSTED", ignoreCase = true)
     }
 
-    private fun formatAiFailureMessage(prefix: String, error: Exception): String {
-        val rawMessage = error.localizedMessage?.takeIf { it.isNotBlank() } ?: "erro de rede ou configuração"
-        val isAppCheckError = rawMessage.contains("App Check", ignoreCase = true) ||
+    fun isAppCheckFailure(error: Throwable?): Boolean {
+        val rawMessage = error?.localizedMessage ?: error?.message ?: return false
+        return rawMessage.contains("App Check", ignoreCase = true) ||
             rawMessage.contains("AppCheck", ignoreCase = true) ||
             rawMessage.contains("403")
+    }
+
+    private suspend fun formatAiFailureMessage(prefix: String, error: Exception, context: Context): String {
+        val rawMessage = error.localizedMessage?.takeIf { it.isNotBlank() } ?: "erro de rede ou configuração"
         return when {
-            isAppCheckError -> {
-                "$prefix: $rawMessage\n\n" +
-                    "Causa provável: o APK de depuração (Debug) fora do AI Studio gera um token de debug não autorizado no Firebase App Check. " +
-                    "Use o APK Release (compilado com reCAPTCHA) ou registre o token de debug no Console do Firebase (App Check)."
+            isAppCheckFailure(error) -> {
+                val diagnostic = runCatching {
+                    inspectAppCheckTokenDiagnostic(context.applicationContext)
+                }.getOrDefault("")
+                buildString {
+                    append("$prefix: $rawMessage")
+                    if (diagnostic.isNotBlank()) {
+                        append("\n\nDiagnóstico: $diagnostic")
+                    }
+                    append("\n\nAPKs instalados fora da Play Store ou do emulador do AI Studio falham na validação App Check/reCAPTCHA do projeto Firebase remoto. Use o botão \"Extrair Agora (OCR Offline)\" abaixo ou XML NF-e / QR DANFE para preencher tudo localmente.")
+                }
             }
             isTransientCapacityError(error) -> {
                 "$prefix: $rawMessage\n\n" +
                     "O servidor da IA está com pico temporário de demanda no momento. " +
-                    "Aguarde alguns segundos e tente novamente (ou utilize o modo Offline / XML NF-e / QR DANFE)."
+                    "Aguarde alguns segundos e tente novamente ou utilize o OCR Offline / XML NF-e / QR DANFE."
             }
             else -> "$prefix: $rawMessage"
         }

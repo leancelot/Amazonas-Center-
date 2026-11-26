@@ -372,6 +372,7 @@ fun ReceivingScreen(
                                 state = extractionState,
                                 onRetryCloud = { viewModel.retryLastMediaWithCloudReserve(context) },
                                 onRetryFullVision = { viewModel.reanalyzeLastMediaWithFullVision(context) },
+                                onUseOfflineFallback = { viewModel.useOfflineFallbackForLastMedia(context) },
                                 onDismiss = viewModel::clearExtractionBanner
                             )
                         }
@@ -852,6 +853,7 @@ fun ReceivingScreen(
                                 state = extractionState,
                                 onRetryCloud = { viewModel.retryLastMediaWithCloudReserve(context) },
                                 onRetryFullVision = { viewModel.reanalyzeLastMediaWithFullVision(context) },
+                                onUseOfflineFallback = { viewModel.useOfflineFallbackForLastMedia(context) },
                                 onDismiss = viewModel::clearExtractionBanner
                             )
                         }
@@ -1638,6 +1640,7 @@ private fun ExtractionBanner(
     state: ExtractionUiState,
     onRetryCloud: () -> Unit,
     onRetryFullVision: () -> Unit,
+    onUseOfflineFallback: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -1812,11 +1815,25 @@ private fun ExtractionBanner(
                             )
                         }
                     }
-                    if (state.canRetryWithCloud || state.canRetryFullVision) {
+                    if (state.canUseOfflineFallback || state.canRetryWithCloud || state.canRetryFullVision) {
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
+                            if (state.canUseOfflineFallback) {
+                                FilledTonalButton(
+                                    onClick = onUseOfflineFallback,
+                                    modifier = Modifier.testTag("use_offline_ocr_fallback_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.WifiOff,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Extrair Agora (OCR Offline)")
+                                }
+                            }
                             if (state.canRetryWithCloud) {
                                 OutlinedButton(
                                     onClick = onRetryCloud,
