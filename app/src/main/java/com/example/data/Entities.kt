@@ -151,7 +151,9 @@ data class StockMovementEntity(
 data class ReceivingSessionSummary(
     val id: String = "",
     val invoiceNumber: String = "",
+    val accessKey: String = "",
     val supplierName: String = "",
+    val supplierCnpj: String = "",
     val receivedAtMillis: Long = 0L,
     val measuredTempCelsius: Double = 2.0,
     val targetZone: String = TemperatureZone.RESFRIADO.name,

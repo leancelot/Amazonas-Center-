@@ -93,14 +93,18 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
 import com.example.data.ReceivingSessionSummary
 import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
 import com.example.domain.invoice.ParsedInvoiceItemDraft
 import com.example.ui.components.ExpiryUrgencyBadge
+import com.example.ui.components.ItemDetailSheet
 import com.example.ui.components.ManualItemSheet
 import com.example.ui.components.MeatTypePill
+import com.example.ui.components.ReceivingSessionDetailSheet
+import com.example.ui.components.StockOutSheet
 import com.example.ui.components.TemperatureZonePill
 import com.example.ui.components.ThermalComplianceBadge
 import com.example.ui.theme.JetBrainsMonoFamily
@@ -131,11 +135,11 @@ fun ReceivingScreen(
     var showManualItemSheet by remember { mutableStateOf(false) }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
     var pendingDeleteSession by remember { mutableStateOf<ReceivingSessionSummary?>(null) }
+    var selectedHistorySession by remember { mutableStateOf<ReceivingSessionSummary?>(null) }
+    var selectedHistoryItem by remember { mutableStateOf<ColdStorageItemEntity?>(null) }
+    var stockOutHistoryItem by remember { mutableStateOf<ColdStorageItemEntity?>(null) }
 
     var quickStep by remember { mutableIntStateOf(0) } // 0 = Entrada na Portaria, 1 = Lançamento da Nota
-    var qSupplier by remember { mutableStateOf("") }
-    var qInvoice by remember { mutableStateOf("") }
-    var qResponsible by remember { mutableStateOf("") }
     var qMeatType by remember { mutableStateOf(com.example.data.MeatType.BOVINA) }
     var qCutName by remember { mutableStateOf("") }
     var qZone by remember { mutableStateOf(TemperatureZone.RESFRIADO) }
@@ -149,9 +153,6 @@ fun ReceivingScreen(
 
     val activeMemberName = sessionState.currentMember?.displayName.orEmpty()
     androidx.compose.runtime.LaunchedEffect(activeMemberName) {
-        if (qResponsible.isBlank() && activeMemberName.isNotBlank()) {
-            qResponsible = activeMemberName
-        }
         if (formState.responsibleName.isBlank() && activeMemberName.isNotBlank()) {
             viewModel.updateResponsibleName(activeMemberName)
         }
@@ -160,9 +161,6 @@ fun ReceivingScreen(
     androidx.compose.runtime.LaunchedEffect(extractionState) {
         val success = extractionState as? ExtractionUiState.Success
         if (success != null && success.message.startsWith("Recebimento salvo!")) {
-            qInvoice = ""
-            qResponsible = activeMemberName
-            qSupplier = ""
             qCutName = ""
             qQtyText = ""
             qBatch = ""
@@ -240,9 +238,9 @@ fun ReceivingScreen(
         val temp = qTempText.replace(',', '.').toDoubleOrNull() ?: qZone.defaultTempCelsius
         if (qty != null && qty > 0.0) {
             viewModel.addQuickEntryItem(
-                supplier = qSupplier.trim(),
-                invoiceNum = qInvoice.trim(),
-                responsible = qResponsible.trim(),
+                supplier = formState.supplierName.trim(),
+                invoiceNum = formState.invoiceNumber.trim(),
+                responsible = formState.responsibleName.trim(),
                 meatType = qMeatType,
                 cutName = qCutName.trim(),
                 zone = qZone,
@@ -257,15 +255,10 @@ fun ReceivingScreen(
             qCutName = ""
             return true
         }
-        if (qSupplier.isNotBlank()) viewModel.updateSupplierName(qSupplier.trim())
-        if (qInvoice.isNotBlank()) viewModel.updateInvoiceNumber(qInvoice.trim())
-        if (qResponsible.isNotBlank()) viewModel.updateResponsibleName(qResponsible.trim())
         return false
     }
 
     fun clearQuickFieldsAfterQueueOrSave() {
-        qInvoice = ""
-        qSupplier = ""
         qCutName = ""
         qQtyText = ""
         qBatch = ""
@@ -365,11 +358,7 @@ fun ReceivingScreen(
                                 queue = pendingQueue,
                                 onResume = { parked ->
                                     viewModel.resumeParkedEntry(parked.id)
-                                    qInvoice = parked.form.invoiceNumber
-                                    qSupplier = parked.form.supplierName
-                                    if (parked.form.responsibleName.isNotBlank()) {
-                                        qResponsible = parked.form.responsibleName
-                                    }
+                                    clearQuickFieldsAfterQueueOrSave()
                                     quickStep = 1
                                 },
                                 onRemove = { parked -> viewModel.removeParkedEntry(parked.id) }
@@ -429,9 +418,8 @@ fun ReceivingScreen(
                                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
                                         OutlinedTextField(
-                                            value = qInvoice.ifBlank { formState.invoiceNumber },
+                                            value = formState.invoiceNumber,
                                             onValueChange = {
-                                                qInvoice = it
                                                 viewModel.updateInvoiceNumber(it)
                                                 qErrorMsg = null
                                             },
@@ -443,8 +431,11 @@ fun ReceivingScreen(
                                                 .testTag("quick_nf_input")
                                         )
                                         OutlinedTextField(
-                                            value = qResponsible,
-                                            onValueChange = { qResponsible = it; qErrorMsg = null },
+                                            value = formState.responsibleName,
+                                            onValueChange = {
+                                                viewModel.updateResponsibleName(it)
+                                                qErrorMsg = null
+                                            },
                                             label = { Text("Responsável *") },
                                             singleLine = true,
                                             modifier = Modifier
@@ -454,9 +445,8 @@ fun ReceivingScreen(
                                     }
 
                                     OutlinedTextField(
-                                        value = qSupplier.ifBlank { formState.supplierName },
+                                        value = formState.supplierName,
                                         onValueChange = {
-                                            qSupplier = it
                                             viewModel.updateSupplierName(it)
                                             qErrorMsg = null
                                         },
@@ -473,15 +463,12 @@ fun ReceivingScreen(
                                             .distinct()
                                             .take(4)
                                     }
-                                    if (recentSuppliers.isNotEmpty() && qSupplier.isBlank() && formState.supplierName.isBlank()) {
+                                    if (recentSuppliers.isNotEmpty() && formState.supplierName.isBlank()) {
                                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                             recentSuppliers.forEach { sup ->
                                                 FilterChip(
                                                     selected = false,
-                                                    onClick = {
-                                                        qSupplier = sup
-                                                        viewModel.updateSupplierName(sup)
-                                                    },
+                                                    onClick = { viewModel.updateSupplierName(sup) },
                                                     label = { Text(sup) }
                                                 )
                                             }
@@ -732,9 +719,9 @@ fun ReceivingScreen(
                                                 qty == null || qty <= 0.0 -> qErrorMsg = "Informe o peso da balança ou quantidade para adicionar."
                                                 else -> {
                                                     viewModel.addQuickEntryItem(
-                                                        supplier = qSupplier.trim(),
-                                                        invoiceNum = qInvoice.trim(),
-                                                        responsible = qResponsible.trim(),
+                                                        supplier = formState.supplierName.trim(),
+                                                        invoiceNum = formState.invoiceNumber.trim(),
+                                                        responsible = formState.responsibleName.trim(),
                                                         meatType = qMeatType,
                                                         cutName = qCutName.trim(),
                                                         zone = qZone,
@@ -765,10 +752,10 @@ fun ReceivingScreen(
                                         onClick = {
                                             val qty = qQtyText.replace(',', '.').toDoubleOrNull()
                                             val hasExistingItems = formState.items.isNotEmpty()
-                                            val resolvedNf = qInvoice.ifBlank { formState.invoiceNumber }
+                                            val resolvedNf = formState.invoiceNumber.trim()
                                             when {
                                                 resolvedNf.isBlank() -> qErrorMsg = "Informe o número da nota (NF)."
-                                                qResponsible.isBlank() && formState.responsibleName.isBlank() -> qErrorMsg = "Informe o responsável pelo recebimento."
+                                                formState.responsibleName.isBlank() -> qErrorMsg = "Informe o responsável pelo recebimento."
                                                 !hasExistingItems && (qty == null || qty <= 0.0) -> qErrorMsg = "Informe o peso da balança ou quantidade."
                                                 else -> {
                                                     commitPendingQuickItemIfEntered()
@@ -795,9 +782,9 @@ fun ReceivingScreen(
                                             onClick = {
                                                 val qty = qQtyText.replace(',', '.').toDoubleOrNull()
                                                 val hasItems = formState.items.isNotEmpty() || (qty != null && qty > 0.0)
-                                                val resolvedNf = qInvoice.ifBlank { formState.invoiceNumber }
-                                                if (!hasItems && resolvedNf.isBlank()) {
-                                                    qErrorMsg = "Preencha ao menos NF ou produto antes de colocar na fila."
+                                                val resolvedNf = formState.invoiceNumber.trim()
+                                                if (!hasItems && resolvedNf.isBlank() && formState.supplierName.isBlank()) {
+                                                    qErrorMsg = "Preencha ao menos NF, fornecedor ou produto antes de colocar na fila."
                                                     return@OutlinedButton
                                                 }
                                                 commitPendingQuickItemIfEntered()
@@ -821,7 +808,7 @@ fun ReceivingScreen(
                                                 val qty = qQtyText.replace(',', '.').toDoubleOrNull()
                                                 val hasExisting = formState.items.isNotEmpty()
                                                 when {
-                                                    qResponsible.isBlank() && formState.responsibleName.isBlank() -> qErrorMsg = "Informe o responsável."
+                                                    formState.responsibleName.isBlank() -> qErrorMsg = "Informe o responsável."
                                                     !hasExisting && (qty == null || qty <= 0.0) -> qErrorMsg = "Informe o peso ou quantidade."
                                                     else -> {
                                                         commitPendingQuickItemIfEntered()
@@ -1241,10 +1228,14 @@ fun ReceivingScreen(
                             }
                         }
                     } else {
-                        items(pastSessions, key = { it.id }) { session ->
+                        items(pastSessions.distinctBy { it.id }, key = { it.id }) { session ->
                             Card(
+                                onClick = { selectedHistorySession = session },
                                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                                modifier = Modifier.fillMaxWidth()
+                                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("history_session_card_${session.id}")
                             ) {
                                 Column(
                                     modifier = Modifier.padding(14.dp),
@@ -1375,6 +1366,55 @@ fun ReceivingScreen(
             onSave = { item ->
                 viewModel.addOrUpdateDraftItem(item)
                 showManualItemSheet = false
+            }
+        )
+    }
+
+    selectedHistorySession?.let { session ->
+        ReceivingSessionDetailSheet(
+            session = session,
+            activeRole = sessionState.activeRole,
+            sessionItemsFlow = viewModel.observeItemsForSession(session.id),
+            onDismiss = { selectedHistorySession = null },
+            onItemClick = { lot ->
+                selectedHistorySession = null
+                selectedHistoryItem = lot
+            },
+            onDeleteSession = {
+                viewModel.deleteSession(session.id)
+            }
+        )
+    }
+
+    selectedHistoryItem?.let { item ->
+        ItemDetailSheet(
+            item = item,
+            activeRole = sessionState.activeRole,
+            movementsFlow = viewModel.observeMovementsForItem(item.id),
+            onDismiss = { selectedHistoryItem = null },
+            onRequestStockOut = {
+                selectedHistoryItem = null
+                stockOutHistoryItem = item
+            },
+            onTransferChamber = { chamberName, zone, tempCelsius ->
+                viewModel.transferChamber(item.id, chamberName, zone, tempCelsius)
+            },
+            onUpdateExpiry = { epochDay ->
+                viewModel.updateExpiry(item.id, epochDay)
+            },
+            onDeleteItem = {
+                viewModel.deleteItem(item.id)
+            }
+        )
+    }
+
+    stockOutHistoryItem?.let { target ->
+        StockOutSheet(
+            item = target,
+            onDismiss = { stockOutHistoryItem = null },
+            onConfirm = { type, qty, reason ->
+                viewModel.recordStockOut(target.id, type, qty, reason)
+                stockOutHistoryItem = null
             }
         )
     }

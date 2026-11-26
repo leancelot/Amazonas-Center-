@@ -147,8 +147,8 @@ class FirestoreColdStorageRepository(
         rawSessionsFlow,
         allItems
     ) { sessions, items ->
-        val itemsBySession = items.groupBy { it.sessionId }
-        sessions.map { s ->
+        val itemsBySession = items.distinctBy { it.id }.groupBy { it.sessionId }
+        sessions.distinctBy { it.id }.map { s ->
             val linked = itemsBySession[s.id].orEmpty()
             val computedCount = if (linked.isNotEmpty()) linked.size else s.itemCount
             val computedKg = if (linked.isNotEmpty()) {
@@ -159,7 +159,9 @@ class FirestoreColdStorageRepository(
             ReceivingSessionSummary(
                 id = s.id,
                 invoiceNumber = s.invoiceNumber,
+                accessKey = s.accessKey,
                 supplierName = s.supplierName,
+                supplierCnpj = s.supplierCnpj,
                 receivedAtMillis = s.receivedAtMillis,
                 measuredTempCelsius = s.measuredTempCelsius,
                 targetZone = s.targetZone,

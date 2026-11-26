@@ -128,12 +128,15 @@ class LocalColdStorageRepository(
 
     override val sessionSummaries: Flow<List<ReceivingSessionSummary>> = _snapshot.map { snap ->
         snap.sessions
+            .distinctBy { it.id }
             .sortedByDescending { it.receivedAtMillis }
             .map {
                 ReceivingSessionSummary(
                     id = it.id,
                     invoiceNumber = it.invoiceNumber,
+                    accessKey = it.accessKey,
                     supplierName = it.supplierName,
+                    supplierCnpj = it.supplierCnpj,
                     receivedAtMillis = it.receivedAtMillis,
                     measuredTempCelsius = it.measuredTempCelsius,
                     targetZone = it.targetZone,

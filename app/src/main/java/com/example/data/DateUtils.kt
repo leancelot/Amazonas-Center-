@@ -89,6 +89,16 @@ object DateUtils {
         return fmt.format(Date(millis))
     }
 
+    fun localTimestampToEpochDay(millis: Long): Long {
+        val cal = Calendar.getInstance().apply { timeInMillis = millis }
+        return calendarToEpochDay(cal)
+    }
+
+    fun isToday(millis: Long): Boolean {
+        if (millis <= 0L) return false
+        return localTimestampToEpochDay(millis) == todayEpochDay()
+    }
+
     fun daysUntil(expiryEpochDay: Long): Int {
         return (expiryEpochDay - todayEpochDay()).toInt()
     }

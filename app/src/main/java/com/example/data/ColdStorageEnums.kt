@@ -209,9 +209,9 @@ enum class MovementType(
 enum class ExpiryUrgency(val label: String, val priority: Int) {
     VENCIDO("Vencido", 0),
     VENCE_HOJE("Vence hoje", 1),
-    CRITICO_3_DIAS("Crítico (≤ 3d)", 2),
-    ATENCAO_7_DIAS("Atenção (≤ 7d)", 3),
-    EM_DIA("Em dia", 4);
+    CRITICO_7_DIAS("Até 7 dias", 2),
+    ATENCAO_15_DIAS("Até 15 dias", 3),
+    EM_DIA("Em dia (> 15d)", 4);
 
     companion object {
         fun fromEpochDay(expiryEpochDay: Long): ExpiryUrgency {
@@ -219,8 +219,8 @@ enum class ExpiryUrgency(val label: String, val priority: Int) {
             return when {
                 days < 0 -> VENCIDO
                 days == 0 -> VENCE_HOJE
-                days <= 3 -> CRITICO_3_DIAS
-                days <= 7 -> ATENCAO_7_DIAS
+                days <= 7 -> CRITICO_7_DIAS
+                days <= 15 -> ATENCAO_15_DIAS
                 else -> EM_DIA
             }
         }

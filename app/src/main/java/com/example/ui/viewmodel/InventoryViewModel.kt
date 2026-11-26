@@ -24,9 +24,10 @@ import kotlinx.coroutines.launch
 
 enum class UrgencyFilter(val label: String) {
     ALL("Todos"),
-    DUE_SOON("Até 3 dias"),
+    DUE_7_DAYS("Até 7 dias"),
+    DUE_15_DAYS("8 a 15 dias"),
     EXPIRED("Vencidos"),
-    ON_TRACK("No prazo")
+    ON_TRACK("Em dia (> 15d)")
 }
 
 data class InventoryUiState(
@@ -92,11 +93,11 @@ class InventoryViewModel(
             val matchesSupplier = supplier == null || item.supplierName.equals(supplier, ignoreCase = true)
             val matchesUrgency = when (urgency) {
                 UrgencyFilter.ALL -> true
-                UrgencyFilter.DUE_SOON -> item.urgency == ExpiryUrgency.VENCE_HOJE ||
-                    item.urgency == ExpiryUrgency.CRITICO_3_DIAS
+                UrgencyFilter.DUE_7_DAYS -> item.urgency == ExpiryUrgency.VENCE_HOJE ||
+                    item.urgency == ExpiryUrgency.CRITICO_7_DIAS
+                UrgencyFilter.DUE_15_DAYS -> item.urgency == ExpiryUrgency.ATENCAO_15_DIAS
                 UrgencyFilter.EXPIRED -> item.urgency == ExpiryUrgency.VENCIDO
-                UrgencyFilter.ON_TRACK -> item.urgency == ExpiryUrgency.ATENCAO_7_DIAS ||
-                    item.urgency == ExpiryUrgency.EM_DIA
+                UrgencyFilter.ON_TRACK -> item.urgency == ExpiryUrgency.EM_DIA
             }
             matchesQuery && matchesMeat && matchesZone && matchesSupplier && matchesUrgency
         }
@@ -154,6 +155,14 @@ class InventoryViewModel(
 
     fun setUrgencyFilter(filter: UrgencyFilter) {
         _urgencyFilter.value = filter
+    }
+
+    fun applyDashboardFilter(filter: UrgencyFilter, zone: TemperatureZone? = null) {
+        _searchQuery.value = ""
+        _selectedMeat.value = null
+        _selectedSupplier.value = null
+        _urgencyFilter.value = filter
+        _selectedZone.value = zone
     }
 
     fun observeMovementsForItem(itemId: String): Flow<List<StockMovementEntity>> =

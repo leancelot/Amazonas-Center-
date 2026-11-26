@@ -70,15 +70,15 @@ fun ExpiryUrgencyBadge(
             Icons.Rounded.Warning,
             "Vence HOJE"
         )
-        ExpiryUrgency.CRITICO_3_DIAS -> Quad(
+        ExpiryUrgency.CRITICO_7_DIAS -> Quad(
             if (isDark) StatusWarningAmberDarkBg else StatusWarningAmberBg,
             if (isDark) Color(0xFFFCD34D) else StatusWarningAmber,
             Icons.Rounded.Schedule,
             "Vence em ${days}d"
         )
-        ExpiryUrgency.ATENCAO_7_DIAS -> Quad(
-            if (isDark) StatusWarningAmberDarkBg else StatusWarningAmberBg,
-            if (isDark) Color(0xFFFDE68A) else StatusWarningAmber,
+        ExpiryUrgency.ATENCAO_15_DIAS -> Quad(
+            if (isDark) Color(0xFF422006) else Color(0xFFFEF3C7),
+            if (isDark) Color(0xFFFDE68A) else Color(0xFFB45309),
             Icons.Rounded.Schedule,
             "Vence em ${days}d"
         )

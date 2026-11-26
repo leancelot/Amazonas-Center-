@@ -336,8 +336,8 @@ private fun FrigStockShell(
                             DashboardScreen(
                                 viewModel = dashboardViewModel,
                                 onNavigateToReceiving = { navigateTopLevel(AppRoute.Receiving) },
-                                onNavigateToInventory = { urgencyFilter ->
-                                    inventoryViewModel.setUrgencyFilter(urgencyFilter)
+                                onNavigateToInventory = { urgencyFilter, zone ->
+                                    inventoryViewModel.applyDashboardFilter(urgencyFilter, zone)
                                     navigateTopLevel(AppRoute.Inventory)
                                 },
                                 onOpenTeamAccess = { showTeamSheet = true },

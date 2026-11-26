@@ -9,9 +9,11 @@ import com.example.data.ColdStorageItemEntity
 import com.example.data.ColdStorageRepository
 import com.example.data.DateUtils
 import com.example.data.InvoiceSourceType
+import com.example.data.MovementType
 import com.example.data.ReceivingSessionEntity
 import com.example.data.ReceivingSessionSummary
 import com.example.data.ShopSessionState
+import com.example.data.StockMovementEntity
 import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
 import com.example.domain.invoice.DanfeQrParser
@@ -21,6 +23,7 @@ import com.example.domain.invoice.NfeXmlParser
 import com.example.domain.invoice.ParsedInvoiceDraft
 import com.example.domain.invoice.ParsedInvoiceItemDraft
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -29,6 +32,8 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.util.UUID
@@ -95,6 +100,16 @@ class ReceivingViewModel(
     private var lastMediaUri: Uri? = null
     private var lastMediaIsPdf: Boolean = false
     private var lastRawOcrText: String = ""
+    private val saveMutex = Mutex()
+    private var lastSavedFingerprint: String? = null
+    private var lastSavedAtMillis: Long = 0L
+
+    fun observeItemsForSession(sessionId: String): Flow<List<ColdStorageItemEntity>> =
+        repository.observeItemsForSession(sessionId).catch { error ->
+            val rootError = unwrapFirestoreStreamError(error)
+            Log.w("ReceivingVM", "Error observing session items", rootError)
+            emit(emptyList())
+        }
 
     val sessionState: StateFlow<ShopSessionState> = repository.sessionState
         .catch { error ->
@@ -542,6 +557,7 @@ class ReceivingViewModel(
 
     fun confirmAndSaveSession() {
         val state = _formState.value
+        if (state.isSaving) return
         if (state.items.isEmpty()) {
             _extractionState.value = ExtractionUiState.Error(
                 "Adicione pelo menos um produto (via NF ou manual) antes de confirmar."
@@ -556,60 +572,87 @@ class ReceivingViewModel(
         val defaultResponsible = state.responsibleName.trim().ifBlank {
             sessionState.value.currentMember?.displayName.orEmpty()
         }
+        val fingerprint = buildSubmissionFingerprint(nf, supplier, state.items)
+        if (fingerprint == lastSavedFingerprint && (now - lastSavedAtMillis) < 15_000L) {
+            return
+        }
+
+        _formState.update { it.copy(isSaving = true) }
 
         viewModelScope.launch {
-            _formState.update { it.copy(isSaving = true) }
-            val session = ReceivingSessionEntity(
-                invoiceNumber = nf,
-                accessKey = state.accessKey.trim(),
-                supplierName = supplier,
-                supplierCnpj = state.supplierCnpj.trim(),
-                receivedAtMillis = now,
-                measuredTempCelsius = temp,
-                targetZone = state.targetZone.name,
-                thermalStatus = compliance.name,
-                responsibleName = defaultResponsible,
-                sourceType = state.sourceType.name,
-                notes = state.notes.trim()
-            )
-            val entities = state.items.map { item ->
-                ColdStorageItemEntity(
-                    meatType = item.meatType.name,
-                    cutName = item.cutName.trim().ifBlank { "Corte Diverso" },
-                    temperatureZone = item.temperatureZone.name,
-                    measuredTempCelsius = item.measuredTempCelsius,
-                    chamberName = item.chamberName.ifBlank { item.temperatureZone.defaultChamber },
-                    batchCode = item.batchCode.trim(),
-                    sifCode = item.sifCode.trim(),
-                    initialQuantity = item.quantity.coerceAtLeast(0.01),
-                    currentQuantity = item.quantity.coerceAtLeast(0.01),
-                    unit = item.unit.name,
-                    unitCostBrl = item.unitCostBrl.coerceAtLeast(0.0),
-                    expiryDateEpochDay = item.expiryEpochDay,
-                    receivedAtMillis = now,
-                    supplierName = supplier,
-                    invoiceNumber = nf,
-                    notes = item.notes.trim()
-                )
-            }
-
-            repository.saveReceivingSession(session, entities).fold(
-                onSuccess = {
-                    lastMediaUri = null
-                    lastRawOcrText = ""
-                    _formState.value = ReceivingFormState(responsibleName = defaultResponsible)
-                    _extractionState.value = ExtractionUiState.Success(
-                        "Recebimento salvo! ${entities.size} lote(s) entraram na câmara fria."
-                    )
-                },
-                onFailure = { err ->
+            saveMutex.withLock {
+                if (fingerprint == lastSavedFingerprint &&
+                    (System.currentTimeMillis() - lastSavedAtMillis) < 15_000L
+                ) {
                     _formState.update { it.copy(isSaving = false) }
-                    _extractionState.value = ExtractionUiState.Error(
-                        friendlyFirestoreMessage(err, "Erro ao salvar recebimento na nuvem.")
+                    return@withLock
+                }
+
+                val session = ReceivingSessionEntity(
+                    invoiceNumber = nf,
+                    accessKey = state.accessKey.trim(),
+                    supplierName = supplier,
+                    supplierCnpj = state.supplierCnpj.trim(),
+                    receivedAtMillis = now,
+                    measuredTempCelsius = temp,
+                    targetZone = state.targetZone.name,
+                    thermalStatus = compliance.name,
+                    responsibleName = defaultResponsible,
+                    sourceType = state.sourceType.name,
+                    notes = state.notes.trim()
+                )
+                val entities = state.items.map { item ->
+                    ColdStorageItemEntity(
+                        meatType = item.meatType.name,
+                        cutName = item.cutName.trim().ifBlank { "Corte Diverso" },
+                        temperatureZone = item.temperatureZone.name,
+                        measuredTempCelsius = item.measuredTempCelsius,
+                        chamberName = item.chamberName.ifBlank { item.temperatureZone.defaultChamber },
+                        batchCode = item.batchCode.trim(),
+                        sifCode = item.sifCode.trim(),
+                        initialQuantity = item.quantity.coerceAtLeast(0.01),
+                        currentQuantity = item.quantity.coerceAtLeast(0.01),
+                        unit = item.unit.name,
+                        unitCostBrl = item.unitCostBrl.coerceAtLeast(0.0),
+                        expiryDateEpochDay = item.expiryEpochDay,
+                        receivedAtMillis = now,
+                        supplierName = supplier,
+                        invoiceNumber = nf,
+                        notes = item.notes.trim()
                     )
                 }
-            )
+
+                repository.saveReceivingSession(session, entities).fold(
+                    onSuccess = {
+                        lastSavedFingerprint = fingerprint
+                        lastSavedAtMillis = System.currentTimeMillis()
+                        lastMediaUri = null
+                        lastRawOcrText = ""
+                        _formState.value = ReceivingFormState(responsibleName = defaultResponsible)
+                        _extractionState.value = ExtractionUiState.Success(
+                            "Recebimento salvo! ${entities.size} lote(s) entraram na câmara fria."
+                        )
+                    },
+                    onFailure = { err ->
+                        _formState.update { it.copy(isSaving = false) }
+                        _extractionState.value = ExtractionUiState.Error(
+                            friendlyFirestoreMessage(err, "Erro ao salvar recebimento na nuvem.")
+                        )
+                    }
+                )
+            }
         }
+    }
+
+    private fun buildSubmissionFingerprint(
+        invoiceNumber: String,
+        supplierName: String,
+        items: List<ParsedInvoiceItemDraft>
+    ): String {
+        val itemsPart = items.joinToString("|") {
+            "${it.cutName.trim().lowercase()}:${it.quantity}:${it.unit.name}:${it.batchCode.trim()}:${it.expiryEpochDay}"
+        }
+        return "${invoiceNumber.lowercase()}|${supplierName.lowercase()}|$itemsPart"
     }
 
     fun resetForm() {
@@ -628,6 +671,87 @@ class ReceivingViewModel(
                 onFailure = { err ->
                     _extractionState.value = ExtractionUiState.Error(
                         friendlyFirestoreMessage(err, "Apenas o gerente pode excluir sessões.")
+                    )
+                }
+            )
+        }
+    }
+
+    fun observeMovementsForItem(itemId: String): Flow<List<StockMovementEntity>> =
+        repository.observeMovementsForItem(itemId).catch { error ->
+            val rootError = unwrapFirestoreStreamError(error)
+            Log.w("ReceivingVM", "Error observing item movements", rootError)
+            emit(emptyList())
+        }
+
+    fun recordStockOut(
+        itemId: String,
+        movementType: MovementType,
+        quantity: Double,
+        reason: String
+    ) {
+        viewModelScope.launch {
+            repository.recordStockOut(itemId, movementType, quantity, reason).fold(
+                onSuccess = { ok ->
+                    _extractionState.value = if (ok) {
+                        ExtractionUiState.Success("Baixa registrada: ${movementType.displayName}")
+                    } else {
+                        ExtractionUiState.Error("Quantidade inválida para baixa.")
+                    }
+                },
+                onFailure = { err ->
+                    _extractionState.value = ExtractionUiState.Error(
+                        friendlyFirestoreMessage(err, "Erro ao registrar baixa no estoque.")
+                    )
+                }
+            )
+        }
+    }
+
+    fun transferChamber(
+        itemId: String,
+        chamberName: String,
+        zone: TemperatureZone,
+        tempCelsius: Double
+    ) {
+        viewModelScope.launch {
+            repository.transferChamber(itemId, chamberName, zone, tempCelsius).fold(
+                onSuccess = {
+                    _extractionState.value = ExtractionUiState.Success("Lote atualizado para $chamberName.")
+                },
+                onFailure = { err ->
+                    _extractionState.value = ExtractionUiState.Error(
+                        friendlyFirestoreMessage(err, "Erro ao atualizar câmara/temperatura.")
+                    )
+                }
+            )
+        }
+    }
+
+    fun updateExpiry(itemId: String, expiryEpochDay: Long) {
+        viewModelScope.launch {
+            repository.updateExpiry(itemId, expiryEpochDay).fold(
+                onSuccess = {
+                    _extractionState.value = ExtractionUiState.Success("Validade atualizada.")
+                },
+                onFailure = { err ->
+                    _extractionState.value = ExtractionUiState.Error(
+                        friendlyFirestoreMessage(err, "Erro ao atualizar validade.")
+                    )
+                }
+            )
+        }
+    }
+
+    fun deleteItem(itemId: String) {
+        viewModelScope.launch {
+            repository.deleteItem(itemId).fold(
+                onSuccess = {
+                    _extractionState.value = ExtractionUiState.Success("Lote removido do estoque.")
+                },
+                onFailure = { err ->
+                    _extractionState.value = ExtractionUiState.Error(
+                        friendlyFirestoreMessage(err, "Apenas o gerente pode excluir lotes.")
                     )
                 }
             )
@@ -694,7 +818,7 @@ class ReceivingViewModel(
 
             val effectiveSessionTemp = when {
                 draft.extractedTempCelsius != null -> draft.extractedTempCelsius
-                userCustomizedTemp && currentSessionTemp != null && inferredZone == current.targetZone -> currentSessionTemp
+                currentSessionTemp != null && userCustomizedTemp && inferredZone == current.targetZone -> currentSessionTemp
                 inferredZone != current.targetZone -> inferredZone.defaultTempCelsius
                 else -> currentSessionTemp ?: inferredZone.defaultTempCelsius
             }

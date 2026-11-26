@@ -151,9 +151,9 @@ class ReportsViewModel(
 
         val expiryBuckets = listOf(
             Triple("Vencidos", true to false) { days: Int -> days < 0 },
-            Triple("Crítico (0 a 2 dias)", true to false) { days: Int -> days in 0..2 },
-            Triple("Atenção (3 a 7 dias)", false to true) { days: Int -> days in 3..7 },
-            Triple("Seguro (> 7 dias)", false to false) { days: Int -> days > 7 }
+            Triple("Crítico (0 a 7 dias)", true to false) { days: Int -> days in 0..7 },
+            Triple("Atenção (8 a 15 dias)", false to true) { days: Int -> days in 8..15 },
+            Triple("Seguro (> 15 dias)", false to false) { days: Int -> days > 15 }
         ).mapNotNull { (label, flags, predicate) ->
             val list = activeItems.filter { predicate(DateUtils.daysUntil(it.expiryDateEpochDay)) }
             if (list.isEmpty()) null else {

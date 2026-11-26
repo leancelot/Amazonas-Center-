@@ -62,10 +62,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
+import com.example.data.ReceivingSessionSummary
 import com.example.data.StaffRole
+import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
 import com.example.ui.components.ExpiryUrgencyBadge
+import com.example.ui.components.ItemDetailSheet
 import com.example.ui.components.MeatTypePill
+import com.example.ui.components.ReceivingSessionDetailSheet
 import com.example.ui.components.StockOutSheet
 import com.example.ui.components.TemperatureZonePill
 import com.example.ui.components.ThermalComplianceBadge
@@ -90,7 +94,7 @@ import java.util.Locale
 fun DashboardScreen(
     viewModel: DashboardViewModel,
     onNavigateToReceiving: () -> Unit,
-    onNavigateToInventory: (UrgencyFilter) -> Unit,
+    onNavigateToInventory: (UrgencyFilter, TemperatureZone?) -> Unit,
     onOpenTeamAccess: () -> Unit,
     modifier: Modifier = Modifier,
     isLocalMode: Boolean = false,
@@ -99,6 +103,8 @@ fun DashboardScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var stockOutTarget by remember { mutableStateOf<ColdStorageItemEntity?>(null) }
+    var selectedItem by remember { mutableStateOf<ColdStorageItemEntity?>(null) }
+    var selectedSession by remember { mutableStateOf<ReceivingSessionSummary?>(null) }
 
     LaunchedEffect(state.feedbackMessage) {
         state.feedbackMessage?.let { msg ->
@@ -206,10 +212,10 @@ fun DashboardScreen(
             item {
                 FefoSummaryRow(
                     expiredCount = state.expiredCount,
-                    dueSoonCount = state.dueSoonCount,
-                    atRisk7DaysCount = state.atRisk7DaysCount,
+                    due7DaysCount = state.due7DaysCount,
+                    due15DaysCount = state.due15DaysCount,
                     onTrackCount = state.onTrackCount,
-                    onCardClick = onNavigateToInventory
+                    onCardClick = { filter -> onNavigateToInventory(filter, null) }
                 )
             }
 
@@ -218,7 +224,7 @@ fun DashboardScreen(
                     SectionTitle(
                         title = "Zonas & Câmaras Ativas",
                         actionLabel = "Ver tudo",
-                        onAction = { onNavigateToInventory(UrgencyFilter.ALL) }
+                        onAction = { onNavigateToInventory(UrgencyFilter.ALL, null) }
                     )
                 }
                 item {
@@ -228,7 +234,7 @@ fun DashboardScreen(
                         items(state.chamberSummaries, key = { it.chamberName }) { chamber ->
                             ChamberSummaryCard(
                                 chamber = chamber,
-                                onClick = { onNavigateToInventory(UrgencyFilter.ALL) }
+                                onClick = { onNavigateToInventory(UrgencyFilter.ALL, chamber.zone) }
                             )
                         }
                     }
@@ -239,7 +245,7 @@ fun DashboardScreen(
                 SectionTitle(
                     title = "Prioridade FEFO (Próximos a Vencer)",
                     actionLabel = if (state.activeItems.isNotEmpty()) "Ver estoque" else null,
-                    onAction = { onNavigateToInventory(UrgencyFilter.ALL) }
+                    onAction = { onNavigateToInventory(UrgencyFilter.ALL, null) }
                 )
             }
 
@@ -248,26 +254,56 @@ fun DashboardScreen(
                     EmptyColdStorageCard(onReceiveClick = onNavigateToReceiving)
                 }
             } else {
-                items(state.priorityFefoItems, key = { "${it.id}_${it.expiryDateEpochDay}" }) { item ->
+                items(state.priorityFefoItems, key = { it.id }) { item ->
                     FefoPriorityItemCard(
                         item = item,
                         canEditStock = state.activeRole.canEditReceivingOrStock,
+                        onClick = { selectedItem = item },
                         onStockOutClick = { stockOutTarget = item }
                     )
                 }
             }
 
-            if (state.recentSessions.isNotEmpty()) {
+            item {
+                SectionTitle(
+                    title = "Recebimentos de Hoje (${state.todaySessions.size})",
+                    actionLabel = "Nova sessão",
+                    onAction = onNavigateToReceiving
+                )
+            }
+
+            if (state.todaySessions.isEmpty()) {
                 item {
-                    SectionTitle(
-                        title = "Últimas Sessões de Recebimento",
-                        actionLabel = "Nova sessão",
-                        onAction = onNavigateToReceiving
-                    )
+                    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Nenhum recebimento registrado hoje",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Somente os lançamentos feitos na data de hoje aparecem neste painel. Toque em Nova sessão ou consulte o Histórico completo em Receber.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
-                items(state.recentSessions, key = { "${it.id}_${it.receivedAtMillis}_${it.invoiceNumber}" }) { session ->
-                    OutlinedCard(
-                        modifier = Modifier.fillMaxWidth()
+            } else {
+                val ptBr = Locale.forLanguageTag("pt-BR")
+                items(state.todaySessions, key = { it.id }) { session ->
+                    Card(
+                        onClick = { selectedSession = session },
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("dashboard_receiving_card_${session.id}")
                     ) {
                         Row(
                             modifier = Modifier
@@ -278,19 +314,31 @@ fun DashboardScreen(
                         ) {
                             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(
-                                    text = session.supplierName,
+                                    text = session.supplierName.ifBlank { "Fornecedor não informado" },
                                     style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
                                     text = buildString {
                                         if (session.invoiceNumber.isNotBlank()) append("NF ${session.invoiceNumber} • ")
-                                        append("${session.itemCount} itens • ${DateUtils.formatShortDate(session.receivedAtMillis)}")
+                                        append("${session.itemCount} corte(s)")
+                                        if (session.totalKg > 0.0) {
+                                            append(" (${String.format(ptBr, "%.1f", session.totalKg)} kg)")
+                                        }
+                                        append(" • ${DateUtils.formatShortDate(session.receivedAtMillis)}")
                                     },
                                     style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                                if (session.responsibleName.isNotBlank()) {
+                                    Text(
+                                        text = "Resp.: ${session.responsibleName}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                             Spacer(Modifier.width(8.dp))
                             ThermalComplianceBadge(
@@ -303,6 +351,44 @@ fun DashboardScreen(
                 }
             }
         }
+    }
+
+    selectedItem?.let { item ->
+        ItemDetailSheet(
+            item = item,
+            activeRole = state.activeRole,
+            movementsFlow = viewModel.observeMovementsForItem(item.id),
+            onDismiss = { selectedItem = null },
+            onRequestStockOut = {
+                selectedItem = null
+                stockOutTarget = item
+            },
+            onTransferChamber = { chamberName, zone, tempCelsius ->
+                viewModel.transferChamber(item.id, chamberName, zone, tempCelsius)
+            },
+            onUpdateExpiry = { epochDay ->
+                viewModel.updateExpiry(item.id, epochDay)
+            },
+            onDeleteItem = {
+                viewModel.deleteItem(item.id)
+            }
+        )
+    }
+
+    selectedSession?.let { session ->
+        ReceivingSessionDetailSheet(
+            session = session,
+            activeRole = state.activeRole,
+            sessionItemsFlow = viewModel.observeItemsForSession(session.id),
+            onDismiss = { selectedSession = null },
+            onItemClick = { lot ->
+                selectedSession = null
+                selectedItem = lot
+            },
+            onDeleteSession = {
+                viewModel.deleteSession(session.id)
+            }
+        )
     }
 
     stockOutTarget?.let { target ->
@@ -456,8 +542,8 @@ private fun HeroColdHeader(
 @Composable
 private fun FefoSummaryRow(
     expiredCount: Int,
-    dueSoonCount: Int,
-    atRisk7DaysCount: Int,
+    due7DaysCount: Int,
+    due15DaysCount: Int,
     onTrackCount: Int,
     onCardClick: (UrgencyFilter) -> Unit
 ) {
@@ -477,24 +563,24 @@ private fun FefoSummaryRow(
                 .testTag("dashboard_expired_card")
         )
         StatUrgencyCard(
-            count = dueSoonCount,
-            label = "Até 3d",
+            count = due7DaysCount,
+            label = "Até 7d",
             bgColor = if (isDark) StatusWarningAmberDarkBg else StatusWarningAmberBg,
             accentColor = if (isDark) Color(0xFFFCD34D) else StatusWarningAmber,
-            onClick = { onCardClick(UrgencyFilter.DUE_SOON) },
+            onClick = { onCardClick(UrgencyFilter.DUE_7_DAYS) },
             modifier = Modifier
                 .weight(1f)
-                .testTag("dashboard_due_soon_card")
+                .testTag("dashboard_due_7d_card")
         )
         StatUrgencyCard(
-            count = atRisk7DaysCount,
-            label = "Atenção 7d",
+            count = due15DaysCount,
+            label = "Até 15d",
             bgColor = if (isDark) Color(0xFF422006) else Color(0xFFFEF3C7),
             accentColor = if (isDark) Color(0xFFFDE68A) else Color(0xFFD97706),
-            onClick = { onCardClick(UrgencyFilter.ON_TRACK) },
+            onClick = { onCardClick(UrgencyFilter.DUE_15_DAYS) },
             modifier = Modifier
                 .weight(1f)
-                .testTag("dashboard_at_risk_card")
+                .testTag("dashboard_due_15d_card")
         )
         StatUrgencyCard(
             count = onTrackCount,
@@ -616,9 +702,11 @@ private fun ChamberSummaryCard(
 private fun FefoPriorityItemCard(
     item: ColdStorageItemEntity,
     canEditStock: Boolean,
+    onClick: () -> Unit,
     onStockOutClick: () -> Unit
 ) {
     Card(
+        onClick = onClick,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         modifier = Modifier
@@ -647,19 +735,29 @@ private fun FefoPriorityItemCard(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "${item.chamberName} • ${DateUtils.formatTemp(item.measuredTempCelsius)}" +
-                            if (item.batchCode.isNotBlank()) " • Lote ${item.batchCode}" else "",
+                        text = buildString {
+                            append("${item.chamberName} • ${DateUtils.formatTemp(item.measuredTempCelsius)}")
+                            if (item.batchCode.isNotBlank()) append(" • Lote ${item.batchCode}")
+                            if (item.supplierName.isNotBlank()) append("\n${item.supplierName}")
+                        },
                         style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Spacer(Modifier.width(8.dp))
-                Text(
-                    text = DateUtils.formatWeightOrQty(item.currentQuantity, item.unitEnum),
-                    style = MaterialTheme.typography.titleLarge.copy(fontFamily = JetBrainsMonoFamily),
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
-                )
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = DateUtils.formatWeightOrQty(item.currentQuantity, item.unitEnum),
+                        style = MaterialTheme.typography.titleLarge.copy(fontFamily = JetBrainsMonoFamily),
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Val: ${DateUtils.formatEpochDay(item.expiryDateEpochDay)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             Row(

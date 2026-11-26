@@ -82,8 +82,19 @@ class InvoiceAndDomainUnitTest {
 
         assertEquals(ExpiryUrgency.VENCIDO, ExpiryUrgency.fromEpochDay(DateUtils.addDaysToTodayEpochDay(-1)))
         assertEquals(ExpiryUrgency.VENCE_HOJE, ExpiryUrgency.fromEpochDay(DateUtils.todayEpochDay()))
-        assertEquals(ExpiryUrgency.CRITICO_3_DIAS, ExpiryUrgency.fromEpochDay(DateUtils.addDaysToTodayEpochDay(3)))
-        assertEquals(ExpiryUrgency.EM_DIA, ExpiryUrgency.fromEpochDay(DateUtils.addDaysToTodayEpochDay(14)))
+        assertEquals(ExpiryUrgency.CRITICO_7_DIAS, ExpiryUrgency.fromEpochDay(DateUtils.addDaysToTodayEpochDay(3)))
+        assertEquals(ExpiryUrgency.CRITICO_7_DIAS, ExpiryUrgency.fromEpochDay(DateUtils.addDaysToTodayEpochDay(7)))
+        assertEquals(ExpiryUrgency.ATENCAO_15_DIAS, ExpiryUrgency.fromEpochDay(DateUtils.addDaysToTodayEpochDay(8)))
+        assertEquals(ExpiryUrgency.ATENCAO_15_DIAS, ExpiryUrgency.fromEpochDay(DateUtils.addDaysToTodayEpochDay(15)))
+        assertEquals(ExpiryUrgency.EM_DIA, ExpiryUrgency.fromEpochDay(DateUtils.addDaysToTodayEpochDay(16)))
+    }
+
+    @Test
+    fun `date utils isToday matches current local calendar day only`() {
+        val now = System.currentTimeMillis()
+        assertTrue(DateUtils.isToday(now))
+        assertFalse(DateUtils.isToday(now - 86_400_000L * 2L))
+        assertFalse(DateUtils.isToday(0L))
     }
 
     @Test
@@ -338,7 +349,28 @@ class InvoiceAndDomainUnitTest {
 
         override val allItems: Flow<List<ColdStorageItemEntity>> = items
 
-        override val sessionSummaries: Flow<List<ReceivingSessionSummary>> = sessions.map { emptyList() }
+        override val sessionSummaries: Flow<List<ReceivingSessionSummary>> =
+            kotlinx.coroutines.flow.combine(sessions, items) { sessionList, itemList ->
+                sessionList.sortedByDescending { it.receivedAtMillis }.map { s ->
+                    val sItems = itemList.filter { it.sessionId == s.id }
+                    ReceivingSessionSummary(
+                        id = s.id,
+                        invoiceNumber = s.invoiceNumber,
+                        accessKey = s.accessKey,
+                        supplierName = s.supplierName,
+                        supplierCnpj = s.supplierCnpj,
+                        receivedAtMillis = s.receivedAtMillis,
+                        measuredTempCelsius = s.measuredTempCelsius,
+                        targetZone = s.targetZone,
+                        thermalStatus = s.thermalStatus,
+                        sourceType = s.sourceType,
+                        responsibleName = s.responsibleName,
+                        itemCount = sItems.size,
+                        totalKg = sItems.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.initialQuantity },
+                        notes = s.notes
+                    )
+                }
+            }
 
         override val allMovements: Flow<List<StockMovementEntity>> = movements
 
