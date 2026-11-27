@@ -437,10 +437,15 @@ private suspend fun tryGoogleIdFallback(
     }
 }
 
-private fun chooseMoreInformativeThrowable(primary: Throwable, fallback: Throwable): Throwable {
+internal fun chooseMoreInformativeThrowable(primary: Throwable, fallback: Throwable): Throwable {
     val fallbackCat = GoogleAuthExceptionHandler.classify(fallback)
     val primaryCat = GoogleAuthExceptionHandler.classify(primary)
-    return if (fallbackCat == AuthFailureCategory.USER_CANCELLED && primaryCat == AuthFailureCategory.REAUTH_16) {
+    val primaryIsSpecificRootCause = primaryCat == AuthFailureCategory.REAUTH_16 ||
+        primaryCat == AuthFailureCategory.DEVELOPER_ERROR_10 ||
+        primaryCat == AuthFailureCategory.FIREBASE_AUTH
+    val fallbackIsGeneric = fallbackCat == AuthFailureCategory.USER_CANCELLED ||
+        fallbackCat == AuthFailureCategory.NO_CREDENTIAL
+    return if (primaryIsSpecificRootCause && fallbackIsGeneric) {
         primary
     } else {
         fallback

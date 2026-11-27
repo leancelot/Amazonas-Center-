@@ -302,42 +302,124 @@ class LocalColdStorageRepository(
         itemId: String,
         movementType: MovementType,
         quantity: Double,
+        reason: String,
+        updatedNotes: String?
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
+        runCatching {
+            val applied = recordBatchStockOutInternal(
+                listOf(
+                    BatchStockOutRequest(
+                        itemId = itemId,
+                        movementType = movementType,
+                        quantity = quantity,
+                        reason = reason,
+                        updatedNotes = updatedNotes
+                    )
+                )
+            )
+            applied > 0
+        }
+    }
+
+    override suspend fun recordBatchStockOut(
+        requests: List<BatchStockOutRequest>
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching {
+            recordBatchStockOutInternal(requests)
+        }
+    }
+
+    private suspend fun recordBatchStockOutInternal(
+        requests: List<BatchStockOutRequest>
+    ): Int = mutex.withLock {
+        if (requests.isEmpty()) return@withLock 0
+        val current = _snapshot.value
+        val workingItems = current.items.associateBy { it.id }.toMutableMap()
+        val newMovements = mutableListOf<LocalMovementDto>()
+        val baseTime = System.currentTimeMillis()
+        var appliedCount = 0
+
+        requests.forEachIndexed { index, req ->
+            val target = workingItems[req.itemId] ?: return@forEachIndexed
+            val safeDeduct = req.quantity.coerceIn(0.0, target.currentQuantity)
+            if (safeDeduct <= 0.001) return@forEachIndexed
+
+            val remaining = (target.currentQuantity - safeDeduct).let { if (it < 0.001) 0.0 else it }
+            val resolvedNotes = (
+                req.updatedNotes
+                    ?: PackSpecHelper.updatePackAfterDeduction(target.notes, remaining)
+                    ?: target.notes
+                ).take(500)
+            val estimatedLoss = if (req.movementType.isLoss && target.unitCostBrl > 0.0) {
+                safeDeduct * target.unitCostBrl
+            } else {
+                0.0
+            }
+
+            workingItems[target.id] = target.copy(
+                currentQuantity = remaining,
+                notes = resolvedNotes
+            )
+            newMovements += LocalMovementDto(
+                id = newId(),
+                createdByName = LOCAL_USER_NAME,
+                itemId = target.id,
+                cutNameSnapshot = target.cutName.ifBlank { "Corte Diverso" }.take(120),
+                meatTypeSnapshot = target.meatType,
+                unitSnapshot = target.unit,
+                movementType = req.movementType.name,
+                quantity = safeDeduct,
+                estimatedLossBrl = estimatedLoss.coerceAtLeast(0.0),
+                reason = req.reason.take(300),
+                createdAtMillis = baseTime + index
+            )
+            appliedCount++
+        }
+
+        if (appliedCount > 0) {
+            val updatedItems = current.items.map { workingItems[it.id] ?: it }
+            persistLocked(
+                current.copy(
+                    items = updatedItems,
+                    movements = current.movements + newMovements
+                )
+            )
+        }
+        appliedCount
+    }
+
+    override suspend fun recordPositiveStockAdjustment(
+        itemId: String,
+        addQuantity: Double,
         reason: String
     ): Result<Boolean> = withContext(Dispatchers.IO) {
         runCatching {
+            if (addQuantity <= 0.001) return@runCatching false
             mutex.withLock {
                 val current = _snapshot.value
                 val target = current.items.firstOrNull { it.id == itemId } ?: return@withLock false
-                val safeDeduct = quantity.coerceIn(0.0, target.currentQuantity)
-                if (safeDeduct <= 0.0) return@withLock false
-
-                val remaining = (target.currentQuantity - safeDeduct).let { if (it < 0.001) 0.0 else it }
-                val estimatedLoss = if (movementType.isLoss && target.unitCostBrl > 0.0) {
-                    safeDeduct * target.unitCostBrl
-                } else {
-                    0.0
-                }
-
+                val nextQty = target.currentQuantity + addQuantity
+                val nextNotes = (PackSpecHelper.updatePackAfterDeduction(target.notes, nextQty) ?: target.notes).take(500)
                 val updatedItems = current.items.map {
-                    if (it.id == itemId) it.copy(currentQuantity = remaining) else it
+                    if (it.id == itemId) it.copy(currentQuantity = nextQty, notes = nextNotes) else it
                 }
-                val newMovement = LocalMovementDto(
+                val mov = LocalMovementDto(
                     id = newId(),
                     createdByName = LOCAL_USER_NAME,
-                    itemId = itemId,
+                    itemId = target.id,
                     cutNameSnapshot = target.cutName.ifBlank { "Corte Diverso" }.take(120),
                     meatTypeSnapshot = target.meatType,
                     unitSnapshot = target.unit,
-                    movementType = movementType.name,
-                    quantity = safeDeduct,
-                    estimatedLossBrl = estimatedLoss.coerceAtLeast(0.0),
+                    movementType = MovementType.ENTRADA.name,
+                    quantity = addQuantity,
+                    estimatedLossBrl = 0.0,
                     reason = reason.take(300),
                     createdAtMillis = System.currentTimeMillis()
                 )
                 persistLocked(
                     current.copy(
                         items = updatedItems,
-                        movements = current.movements + newMovement
+                        movements = current.movements + mov
                     )
                 )
                 true

@@ -10,6 +10,8 @@ import com.example.data.ColdStorageRepository
 import com.example.data.DateUtils
 import com.example.data.InvoiceSourceType
 import com.example.data.MovementType
+import com.example.data.PackSpecHelper
+import com.example.data.PackUnitType
 import com.example.data.ReceivingSessionEntity
 import com.example.data.ReceivingSessionSummary
 import com.example.data.ShopSessionState
@@ -711,6 +713,14 @@ class ReceivingViewModel(
                     notes = state.notes.trim()
                 )
                 val entities = state.items.map { item ->
+                    val safeQty = item.quantity.coerceAtLeast(0.01)
+                    val notesWithPack = PackSpecHelper.applyPackMetadata(
+                        userNotes = item.notes.trim(),
+                        packCount = item.packCount,
+                        packType = item.packUnit,
+                        totalQuantity = safeQty,
+                        unit = item.unit
+                    )
                     ColdStorageItemEntity(
                         meatType = item.meatType.name,
                         cutName = item.cutName.trim().ifBlank { "Corte Diverso" },
@@ -719,15 +729,15 @@ class ReceivingViewModel(
                         chamberName = item.chamberName.ifBlank { item.temperatureZone.defaultChamber },
                         batchCode = item.batchCode.trim(),
                         sifCode = item.sifCode.trim(),
-                        initialQuantity = item.quantity.coerceAtLeast(0.01),
-                        currentQuantity = item.quantity.coerceAtLeast(0.01),
+                        initialQuantity = safeQty,
+                        currentQuantity = safeQty,
                         unit = item.unit.name,
                         unitCostBrl = item.unitCostBrl.coerceAtLeast(0.0),
                         expiryDateEpochDay = item.expiryEpochDay,
                         receivedAtMillis = now,
                         supplierName = supplier,
                         invoiceNumber = nf,
-                        notes = item.notes.trim()
+                        notes = notesWithPack
                     )
                 }
 
@@ -975,7 +985,9 @@ class ReceivingViewModel(
         quantity: Double,
         unit: com.example.data.MeasurementUnit,
         batch: String,
-        expiryEpochDay: Long
+        expiryEpochDay: Long,
+        packCount: Int = 0,
+        packUnit: PackUnitType = PackUnitType.CAIXA
     ) {
         val resolvedCut = cutName.trim().ifBlank { meatType.displayName }
         _formState.update { current ->
@@ -989,7 +1001,9 @@ class ReceivingViewModel(
                 quantity = quantity,
                 unit = unit,
                 batchCode = batch,
-                expiryEpochDay = expiryEpochDay
+                expiryEpochDay = expiryEpochDay,
+                packCount = packCount.coerceAtLeast(0),
+                packUnit = packUnit
             )
             current.copy(
                 supplierName = supplier.ifBlank { current.supplierName },

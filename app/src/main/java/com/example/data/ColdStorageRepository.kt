@@ -38,6 +38,17 @@ interface ColdStorageRepository {
         itemId: String,
         movementType: MovementType,
         quantity: Double,
+        reason: String,
+        updatedNotes: String? = null
+    ): Result<Boolean>
+
+    suspend fun recordBatchStockOut(
+        requests: List<BatchStockOutRequest>
+    ): Result<Int>
+
+    suspend fun recordPositiveStockAdjustment(
+        itemId: String,
+        addQuantity: Double,
         reason: String
     ): Result<Boolean>
 

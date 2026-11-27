@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import com.example.data.DateUtils
 import com.example.data.MeatType
 import com.example.data.MeasurementUnit
+import com.example.data.PackUnitType
 import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
 import com.example.domain.invoice.ParsedInvoiceItemDraft
@@ -101,6 +102,10 @@ fun ManualItemSheet(
     var batchCode by remember { mutableStateOf(initialItem?.batchCode ?: "") }
     var sifCode by remember { mutableStateOf(initialItem?.sifCode ?: "") }
     var notes by remember { mutableStateOf(initialItem?.notes ?: "") }
+    var packCountText by remember {
+        mutableStateOf(if (initialItem != null && initialItem.packCount > 0) initialItem.packCount.toString() else "")
+    }
+    var packUnit by remember { mutableStateOf(initialItem?.packUnit ?: PackUnitType.CAIXA) }
     var expiryEpochDay by remember {
         mutableLongStateOf(
             initialItem?.expiryEpochDay ?: DateUtils.addDaysToTodayEpochDay(
@@ -209,7 +214,12 @@ fun ManualItemSheet(
                         selected = zone == z,
                         onClick = {
                             zone = z
-                            chamberName = z.defaultChamber
+                            val isGenericChamber = TemperatureZone.entries.any {
+                                it.defaultChamber.equals(chamberName.trim(), ignoreCase = true)
+                            }
+                            if (chamberName.isBlank() || isGenericChamber) {
+                                chamberName = z.defaultChamber
+                            }
                             val nextTemp = if (initialItem == null && z == defaultZone && sessionTempCelsius != null) {
                                 sessionTempCelsius
                             } else {
@@ -232,6 +242,30 @@ fun ManualItemSheet(
                     )
                 }
             }
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                TemperatureZone.defaultChambers.forEach { preset ->
+                    FilterChip(
+                        selected = chamberName.trim().equals(preset, ignoreCase = true),
+                        onClick = { chamberName = preset },
+                        label = { Text(preset) }
+                    )
+                }
+            }
+
+            OutlinedTextField(
+                value = chamberName,
+                onValueChange = { chamberName = it },
+                label = { Text("Câmara / Unidade") },
+                placeholder = { Text("Ex.: Bairro de Fátima, Resfriado...") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("manual_chamber_input")
+            )
 
             OutlinedTextField(
                 value = tempText,
@@ -299,6 +333,47 @@ fun ManualItemSheet(
                         onClick = { unit = u },
                         label = { Text(u.displayName) },
                         modifier = Modifier.testTag("manual_unit_chip_${u.name.lowercase()}")
+                    )
+                }
+            }
+
+            if (unit == MeasurementUnit.KG) {
+                val parsedQty = quantityText.replace(',', '.').toDoubleOrNull() ?: 0.0
+                val parsedPacks = packCountText.toIntOrNull() ?: 0
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedTextField(
+                        value = packCountText,
+                        onValueChange = { raw -> packCountText = raw.filter { it.isDigit() }.take(4) },
+                        label = { Text("Qtd. volumes (opc.)") },
+                        placeholder = { Text("Ex.: 3") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("manual_pack_count_input")
+                    )
+                    FlowRow(
+                        modifier = Modifier.weight(1f),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        PackUnitType.entries.forEach { pType ->
+                            FilterChip(
+                                selected = packUnit == pType,
+                                onClick = { packUnit = pType },
+                                label = { Text(pType.pluralLabel) }
+                            )
+                        }
+                    }
+                }
+                if (parsedQty > 0.0 && parsedPacks > 0) {
+                    val avgKg = parsedQty / parsedPacks.toDouble()
+                    Text(
+                        text = "Peso médio calculado: ~${String.format(Locale.forLanguageTag("pt-BR"), "%.1f", avgKg)} kg/${packUnit.shortLabel} (habilita saída em 1 toque)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary
                     )
                 }
             }
@@ -383,6 +458,11 @@ fun ManualItemSheet(
                         else -> {
                             val parsedTemp = tempText.replace(',', '.').toDoubleOrNull() ?: zone.defaultTempCelsius
                             val parsedCost = costText.replace(',', '.').toDoubleOrNull() ?: 0.0
+                            val parsedPacks = if (unit == MeasurementUnit.KG) {
+                                packCountText.toIntOrNull()?.coerceAtLeast(0) ?: 0
+                            } else {
+                                0
+                            }
                             onSave(
                                 ParsedInvoiceItemDraft(
                                     localId = initialItem?.localId ?: UUID.randomUUID().toString(),
@@ -398,7 +478,9 @@ fun ManualItemSheet(
                                     batchCode = batchCode.trim(),
                                     sifCode = sifCode.trim(),
                                     expiryEpochDay = expiryEpochDay,
-                                    notes = notes.trim()
+                                    notes = notes.trim(),
+                                    packCount = parsedPacks,
+                                    packUnit = packUnit
                                 )
                             )
                         }

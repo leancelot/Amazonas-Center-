@@ -590,39 +590,167 @@ class FirestoreColdStorageRepository(
         itemId: String,
         movementType: MovementType,
         quantity: Double,
+        reason: String,
+        updatedNotes: String?
+    ): Result<Boolean> {
+        val result = recordBatchStockOut(
+            listOf(
+                BatchStockOutRequest(
+                    itemId = itemId,
+                    movementType = movementType,
+                    quantity = quantity,
+                    reason = reason,
+                    updatedNotes = updatedNotes
+                )
+            )
+        )
+        return result.map { it > 0 }
+    }
+
+    override suspend fun recordBatchStockOut(
+        requests: List<BatchStockOutRequest>
+    ): Result<Int> {
+        var path = "shops/unknown/cold_storage_items"
+        return try {
+            val uid = requireUserId()
+            if (requests.isEmpty()) return Result.success(0)
+            val (shopId, memberUids) = currentShopContext()
+            val itemsCol = db.collection("shops").document(shopId).collection("cold_storage_items")
+            val movsCol = db.collection("shops").document(shopId).collection("stock_movements")
+            path = itemsCol.path
+
+            val uniqueIds = requests.map { it.itemId }.filter { it.isNotBlank() }.distinct()
+            val loadedItems = mutableMapOf<String, ColdStorageItemEntity>()
+            for (id in uniqueIds) {
+                val snap = itemsCol.document(id).get().await()
+                val item = snap.toObject(
+                    ColdStorageItemEntity::class.java,
+                    DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                )
+                if (item != null) {
+                    loadedItems[id] = item
+                }
+            }
+
+            data class PendingOp(
+                val itemId: String,
+                val remainingQty: Double,
+                val resolvedNotes: String?,
+                val movementMap: Map<String, Any>
+            )
+
+            val pendingOps = mutableListOf<PendingOp>()
+            val baseMillis = System.currentTimeMillis()
+            requests.forEachIndexed { idx, req ->
+                val item = loadedItems[req.itemId] ?: return@forEachIndexed
+                val safeDeduct = req.quantity.coerceIn(0.0, item.currentQuantity)
+                if (safeDeduct <= 0.001) return@forEachIndexed
+
+                val remaining = (item.currentQuantity - safeDeduct).let { if (it < 0.001) 0.0 else it }
+                val nextNotes = (req.updatedNotes
+                    ?: PackSpecHelper.updatePackAfterDeduction(item.notes, remaining))
+                    ?.take(500)
+                val estimatedLoss = if (req.movementType.isLoss && item.unitCostBrl > 0.0) {
+                    safeDeduct * item.unitCostBrl
+                } else {
+                    0.0
+                }
+
+                loadedItems[item.id] = item.copy(
+                    currentQuantity = remaining,
+                    notes = nextNotes ?: item.notes
+                )
+
+                val movMap = mapOf(
+                    "shopId" to shopId,
+                    "memberUids" to memberUids,
+                    "createdByUid" to uid,
+                    "createdByName" to currentUserDisplayName.take(100),
+                    "itemId" to item.id,
+                    "cutNameSnapshot" to item.cutName.ifBlank { "Corte Diverso" }.take(120),
+                    "meatTypeSnapshot" to item.meatType,
+                    "unitSnapshot" to item.unit,
+                    "movementType" to req.movementType.name,
+                    "quantity" to safeDeduct,
+                    "estimatedLossBrl" to estimatedLoss.coerceAtLeast(0.0),
+                    "reason" to req.reason.take(300),
+                    "createdAtMillis" to (baseMillis + idx),
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+                pendingOps += PendingOp(
+                    itemId = item.id,
+                    remainingQty = remaining,
+                    resolvedNotes = nextNotes?.takeIf { it != item.notes },
+                    movementMap = movMap
+                )
+            }
+
+            if (pendingOps.isEmpty()) return Result.success(0)
+
+            // Firestore limits WriteBatch to 500 ops; 2 ops per PendingOp -> chunk by 200
+            for (chunk in pendingOps.chunked(200)) {
+                val batch = db.batch()
+                for (op in chunk) {
+                    val itemRef = itemsCol.document(op.itemId)
+                    val updateMap = mutableMapOf<String, Any>(
+                        "currentQuantity" to op.remainingQty,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    if (op.resolvedNotes != null) {
+                        updateMap["notes"] = op.resolvedNotes
+                    }
+                    batch.update(itemRef, updateMap)
+
+                    val movRef = movsCol.document(newDocId())
+                    batch.set(movRef, op.movementMap)
+                }
+                batch.commit().await()
+            }
+
+            Result.success(pendingOps.size)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun recordPositiveStockAdjustment(
+        itemId: String,
+        addQuantity: Double,
         reason: String
     ): Result<Boolean> {
         var path = "shops/unknown/cold_storage_items/$itemId"
         return try {
             val uid = requireUserId()
-            require(itemId.isNotBlank()) { "ID do lote inválido" }
+            if (itemId.isBlank() || addQuantity <= 0.001) return Result.success(false)
             val (shopId, memberUids) = currentShopContext()
             val itemRef = db.collection("shops").document(shopId)
                 .collection("cold_storage_items").document(itemId)
             path = itemRef.path
 
             val snap = itemRef.get().await()
-            val item = snap.toObject(ColdStorageItemEntity::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                ?: return Result.success(false)
+            val item = snap.toObject(
+                ColdStorageItemEntity::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+            ) ?: return Result.success(false)
 
-            val safeDeduct = quantity.coerceIn(0.0, item.currentQuantity)
-            if (safeDeduct <= 0.0) return Result.success(false)
-
-            val remaining = (item.currentQuantity - safeDeduct).let { if (it < 0.001) 0.0 else it }
-            val estimatedLoss = if (movementType.isLoss && item.unitCostBrl > 0.0) safeDeduct * item.unitCostBrl else 0.0
-
-            val movId = newDocId()
-            val movRef = db.collection("shops").document(shopId)
-                .collection("stock_movements").document(movId)
-
+            val nextQty = item.currentQuantity + addQuantity
+            val nextNotes = PackSpecHelper.updatePackAfterDeduction(item.notes, nextQty)?.take(500)
             val batch = db.batch()
-            batch.update(
-                itemRef,
-                mapOf(
-                    "currentQuantity" to remaining,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
+            val updateMap = mutableMapOf<String, Any>(
+                "currentQuantity" to nextQty,
+                "updatedAt" to FieldValue.serverTimestamp()
             )
+            if (nextNotes != null && nextNotes != item.notes) {
+                updateMap["notes"] = nextNotes
+            }
+            batch.update(itemRef, updateMap)
+
+            val movRef = db.collection("shops").document(shopId)
+                .collection("stock_movements").document(newDocId())
             batch.set(
                 movRef,
                 mapOf(
@@ -630,13 +758,13 @@ class FirestoreColdStorageRepository(
                     "memberUids" to memberUids,
                     "createdByUid" to uid,
                     "createdByName" to currentUserDisplayName.take(100),
-                    "itemId" to itemId,
+                    "itemId" to item.id,
                     "cutNameSnapshot" to item.cutName.ifBlank { "Corte Diverso" }.take(120),
                     "meatTypeSnapshot" to item.meatType,
                     "unitSnapshot" to item.unit,
-                    "movementType" to movementType.name,
-                    "quantity" to safeDeduct,
-                    "estimatedLossBrl" to estimatedLoss.coerceAtLeast(0.0),
+                    "movementType" to MovementType.ENTRADA.name,
+                    "quantity" to addQuantity,
+                    "estimatedLossBrl" to 0.0,
                     "reason" to reason.take(300),
                     "createdAtMillis" to System.currentTimeMillis(),
                     "createdAt" to FieldValue.serverTimestamp(),

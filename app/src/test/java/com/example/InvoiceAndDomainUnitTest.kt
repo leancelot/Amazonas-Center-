@@ -1,5 +1,6 @@
 package com.example
 
+import com.example.data.BatchStockOutRequest
 import com.example.data.ColdStorageItemEntity
 import com.example.data.ColdStorageRepository
 import com.example.data.DateUtils
@@ -8,6 +9,7 @@ import com.example.data.InvoiceSourceType
 import com.example.data.MeatType
 import com.example.data.MeasurementUnit
 import com.example.data.MovementType
+import com.example.data.PackSpecHelper
 import com.example.data.ReceivingSessionEntity
 import com.example.data.ReceivingSessionSummary
 import com.example.data.ShopInfo
@@ -481,25 +483,75 @@ class InvoiceAndDomainUnitTest {
             itemId: String,
             movementType: MovementType,
             quantity: Double,
+            reason: String,
+            updatedNotes: String?
+        ): Result<Boolean> {
+            return recordBatchStockOut(
+                listOf(
+                    BatchStockOutRequest(
+                        itemId = itemId,
+                        movementType = movementType,
+                        quantity = quantity,
+                        reason = reason,
+                        updatedNotes = updatedNotes
+                    )
+                )
+            ).map { it > 0 }
+        }
+
+        override suspend fun recordBatchStockOut(
+            requests: List<BatchStockOutRequest>
+        ): Result<Int> {
+            var applied = 0
+            requests.forEach { req ->
+                val item = items.value.firstOrNull { it.id == req.itemId } ?: return@forEach
+                val deduct = req.quantity.coerceIn(0.0, item.currentQuantity)
+                if (deduct <= 0.0) return@forEach
+                val remaining = (item.currentQuantity - deduct).let { if (it < 0.001) 0.0 else it }
+                val resolvedNotes = req.updatedNotes ?: (PackSpecHelper.updatePackAfterDeduction(
+                    existingNotes = item.notes,
+                    remainingQuantity = remaining
+                ) ?: item.notes)
+                items.value = items.value.map {
+                    if (it.id == req.itemId) it.copy(currentQuantity = remaining, notes = resolvedNotes) else it
+                }
+                val loss = if (req.movementType.isLoss) deduct * item.unitCostBrl else 0.0
+                movements.value = movements.value + StockMovementEntity(
+                    id = "m_${nextMovementId++}",
+                    itemId = req.itemId,
+                    cutNameSnapshot = item.cutName,
+                    meatTypeSnapshot = item.meatType,
+                    unitSnapshot = item.unit,
+                    movementType = req.movementType.name,
+                    quantity = deduct,
+                    estimatedLossBrl = loss,
+                    reason = req.reason
+                )
+                applied++
+            }
+            return Result.success(applied)
+        }
+
+        override suspend fun recordPositiveStockAdjustment(
+            itemId: String,
+            addQuantity: Double,
             reason: String
         ): Result<Boolean> {
             val item = items.value.firstOrNull { it.id == itemId } ?: return Result.success(false)
-            val deduct = quantity.coerceIn(0.0, item.currentQuantity)
-            if (deduct <= 0.0) return Result.success(false)
-            val remaining = (item.currentQuantity - deduct).let { if (it < 0.001) 0.0 else it }
+            if (addQuantity <= 0.001) return Result.success(false)
+            val nextQty = item.currentQuantity + addQuantity
+            val nextNotes = PackSpecHelper.updatePackAfterDeduction(item.notes, nextQty) ?: item.notes
             items.value = items.value.map {
-                if (it.id == itemId) it.copy(currentQuantity = remaining) else it
+                if (it.id == itemId) it.copy(currentQuantity = nextQty, notes = nextNotes) else it
             }
-            val loss = if (movementType.isLoss) deduct * item.unitCostBrl else 0.0
             movements.value = movements.value + StockMovementEntity(
                 id = "m_${nextMovementId++}",
                 itemId = itemId,
                 cutNameSnapshot = item.cutName,
                 meatTypeSnapshot = item.meatType,
                 unitSnapshot = item.unit,
-                movementType = movementType.name,
-                quantity = deduct,
-                estimatedLossBrl = loss,
+                movementType = MovementType.ENTRADA.name,
+                quantity = addQuantity,
                 reason = reason
             )
             return Result.success(true)

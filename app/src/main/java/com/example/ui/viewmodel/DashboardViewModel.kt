@@ -5,17 +5,28 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.BackupRestoreSummary
+import com.example.data.BatchStockOutRequest
 import com.example.data.ChamberTempLog
 import com.example.data.ChamberTempLogStore
 import com.example.data.ColdStorageItemEntity
 import com.example.data.ColdStorageRepository
+import com.example.data.CutFefoGroup
 import com.example.data.DateUtils
 import com.example.data.ExpiryUrgency
+import com.example.data.FastClosurePlan
+import com.example.data.FefoLotAllocation
 import com.example.data.LocalColdStorageBackupEnvelope
 import com.example.data.LocalColdStorageRepository
 import com.example.data.MeasurementUnit
 import com.example.data.MovementType
 import com.example.data.ReceivingSessionSummary
+import com.example.data.ReconciliationCadenceStatus
+import com.example.data.ReconciliationProfile
+import com.example.data.ReconciliationScopeType
+import com.example.data.ScaleDifferencePlan
+import com.example.data.ScaleReconciliationEngine
+import com.example.data.ScaleReconciliationRecord
+import com.example.data.ScaleReconciliationStore
 import com.example.data.ShopSessionState
 import com.example.data.StaffRole
 import com.example.data.StockMovementEntity
@@ -49,6 +60,10 @@ data class DashboardUiState(
     val todayTempLogs: List<ChamberTempLog> = emptyList(),
     val latestTempLog: ChamberTempLog? = null,
     val backupSummary: BackupRestoreSummary? = null,
+    val reconciliationProfiles: List<ReconciliationProfile> = emptyList(),
+    val reconciliationRecords: List<ScaleReconciliationRecord> = emptyList(),
+    val allMovements: List<StockMovementEntity> = emptyList(),
+    val dueReconciliationCount: Int = 0,
     val totalKg: Double = 0.0,
     val totalOtherUnits: Int = 0,
     val activeLotCount: Int = 0,
@@ -66,6 +81,7 @@ data class DashboardUiState(
 class DashboardViewModel(
     private val repository: ColdStorageRepository,
     private val chamberTempLogStore: ChamberTempLogStore? = null,
+    private val scaleReconciliationStore: ScaleReconciliationStore? = null,
     private val appContext: Context? = null
 ) : ViewModel() {
 
@@ -74,9 +90,25 @@ class DashboardViewModel(
     private val tempLogsFlow: StateFlow<List<ChamberTempLog>> =
         chamberTempLogStore?.logs ?: emptyTempLogsFlow
 
+    private val defaultProfilesFlow = MutableStateFlow(ScaleReconciliationStore.defaultProfiles())
+    private val profilesFlow: StateFlow<List<ReconciliationProfile>> =
+        scaleReconciliationStore?.profiles ?: defaultProfilesFlow
+
+    private val emptyRecordsFlow = MutableStateFlow<List<ScaleReconciliationRecord>>(emptyList())
+    private val recordsFlow: StateFlow<List<ScaleReconciliationRecord>> =
+        scaleReconciliationStore?.records ?: emptyRecordsFlow
+
     private val emptyBackupTimeFlow = MutableStateFlow(0L)
     private val lastBackupTimeFlow: StateFlow<Long> =
         (repository as? LocalColdStorageRepository)?.lastBackupAtMillis ?: emptyBackupTimeFlow
+
+    private val reconciliationCombinedFlow = combine(
+        repository.allMovements,
+        profilesFlow,
+        recordsFlow
+    ) { movements, profiles, records ->
+        Triple(movements, profiles, records)
+    }
 
     private val baseDataFlow = combine(
         repository.activeItemsFefo,
@@ -90,8 +122,9 @@ class DashboardViewModel(
         baseDataFlow,
         tempLogsFlow,
         lastBackupTimeFlow,
+        reconciliationCombinedFlow,
         _feedback
-    ) { (items, sessions, session), tempLogs, lastBackupMillis, feedback ->
+    ) { (items, sessions, session), tempLogs, lastBackupMillis, (movements, profiles, records), feedback ->
         appContext?.let { ExpiryNotificationManager.updateCachedLots(it, items) }
 
         val totalKg = items.filter { it.unitEnum == MeasurementUnit.KG }.sumOf { it.currentQuantity }
@@ -145,6 +178,21 @@ class DashboardViewModel(
                 exportedAtMillis = lastBackupMillis
             )
 
+        val now = System.currentTimeMillis()
+        val dueReconciliationCount = profiles.count { profile ->
+            val hasActiveKg = ScaleReconciliationEngine.filterMatchingLots(
+                items,
+                profile.scopeTypeEnum,
+                profile.scopeFilter
+            ).isNotEmpty()
+            if (!hasActiveKg) {
+                false
+            } else {
+                val st = profile.evaluateStatus(movements, now).status
+                st == ReconciliationCadenceStatus.DUE || st == ReconciliationCadenceStatus.NEVER_CHECKED
+            }
+        }
+
         DashboardUiState(
             activeItems = items,
             priorityFefoItems = items.take(8),
@@ -154,6 +202,10 @@ class DashboardViewModel(
             todayTempLogs = todayTempLogs,
             latestTempLog = tempLogs.firstOrNull(),
             backupSummary = backupSummary,
+            reconciliationProfiles = profiles,
+            reconciliationRecords = records,
+            allMovements = movements,
+            dueReconciliationCount = dueReconciliationCount,
             totalKg = totalKg,
             totalOtherUnits = otherUnits,
             activeLotCount = items.size,
@@ -275,6 +327,140 @@ class DashboardViewModel(
                 onFailure = { err ->
                     _feedback.value = friendlyFirestoreMessage(err, "Erro ao registrar baixa no estoque.")
                 }
+            )
+        }
+    }
+
+    fun recordCutStockOutFefo(
+        group: CutFefoGroup,
+        movementType: MovementType,
+        allocations: List<FefoLotAllocation>,
+        reason: String
+    ) {
+        if (allocations.isEmpty()) return
+        val requests = allocations.map { alloc ->
+            BatchStockOutRequest(
+                itemId = alloc.item.id,
+                movementType = movementType,
+                quantity = alloc.deductQuantity,
+                reason = reason,
+                updatedNotes = alloc.updatedNotes
+            )
+        }
+        val totalDeducted = allocations.sumOf { it.deductQuantity }
+        viewModelScope.launch {
+            repository.recordBatchStockOut(requests).fold(
+                onSuccess = { count ->
+                    _feedback.value = if (count > 0) {
+                        "Saída FEFO aplicada: -${DateUtils.formatWeightOrQty(totalDeducted, group.unit)} de ${group.cutName} em $count lote(s)."
+                    } else {
+                        "Não foi possível aplicar a saída FEFO."
+                    }
+                },
+                onFailure = { err ->
+                    _feedback.value = friendlyFirestoreMessage(err, "Erro ao registrar saída rápida FEFO.")
+                }
+            )
+        }
+    }
+
+    fun applyFastStockClosure(plan: FastClosurePlan) {
+        if (plan.requests.isEmpty()) return
+        viewModelScope.launch {
+            repository.recordBatchStockOut(plan.requests).fold(
+                onSuccess = { count ->
+                    _feedback.value = if (count > 0) {
+                        val ptBr = java.util.Locale.forLanguageTag("pt-BR")
+                        val qtyDesc = buildList {
+                            if (plan.totalDeductedKg > 0.0) {
+                                add("${String.format(ptBr, "%.2f", plan.totalDeductedKg)} kg")
+                            }
+                            if (plan.totalDeductedOtherUnits > 0) {
+                                add("${plan.totalDeductedOtherUnits} pç/cx")
+                            }
+                        }.joinToString(" + ")
+                        "Fechamento aplicado: $qtyDesc baixados em $count lote(s) (FEFO)."
+                    } else {
+                        "Nenhuma baixa aplicada no fechamento."
+                    }
+                },
+                onFailure = { err ->
+                    _feedback.value = friendlyFirestoreMessage(err, "Erro ao aplicar fechamento rápido.")
+                }
+            )
+        }
+    }
+
+    fun applyScaleDifferencePlan(plan: ScaleDifferencePlan) {
+        viewModelScope.launch {
+            val ptBr = java.util.Locale.forLanguageTag("pt-BR")
+            when {
+                plan.isLossOrOutflow -> {
+                    repository.recordBatchStockOut(plan.requests).fold(
+                        onSuccess = { count ->
+                            scaleReconciliationStore?.recordCheckResult(plan, count)
+                            _feedback.value = if (count > 0) {
+                                "Ajuste aplicado: -${String.format(ptBr, "%.2f", plan.differenceKg)} kg (${String.format(ptBr, "%.1f", plan.shrinkagePercent)}% quebra) em $count lote(s)."
+                            } else {
+                                "Nenhum lote alterado."
+                            }
+                        },
+                        onFailure = { err ->
+                            _feedback.value = friendlyFirestoreMessage(err, "Erro ao aplicar ajuste por diferença.")
+                        }
+                    )
+                }
+                plan.isSurplus && plan.surplusTargetLot != null -> {
+                    val reason = "[Rotina:${plan.profileId}] Ajuste balança (${plan.profileName}): sobra +${String.format(ptBr, "%.2f", plan.surplusAddKg)} kg"
+                    repository.recordPositiveStockAdjustment(plan.surplusTargetLot.id, plan.surplusAddKg, reason).fold(
+                        onSuccess = { ok ->
+                            if (ok) scaleReconciliationStore?.recordCheckResult(plan, 1)
+                            _feedback.value = if (ok) {
+                                "Ajuste positivo registrado: +${String.format(ptBr, "%.2f", plan.surplusAddKg)} kg na balança."
+                            } else {
+                                "Não foi possível aplicar o ajuste positivo."
+                            }
+                        },
+                        onFailure = { err ->
+                            _feedback.value = friendlyFirestoreMessage(err, "Erro ao registrar sobra na balança.")
+                        }
+                    )
+                }
+                else -> {
+                    scaleReconciliationStore?.recordCheckResult(plan, 0)
+                    _feedback.value = "Conferência registrada (${plan.profileName}): estoque 100% exato (0% quebra)."
+                }
+            }
+        }
+    }
+
+    fun saveReconciliationProfile(
+        id: String?,
+        name: String,
+        scopeType: ReconciliationScopeType,
+        scopeFilter: String,
+        intervalDays: Int,
+        preferredMovementType: MovementType
+    ) {
+        val store = scaleReconciliationStore ?: return
+        viewModelScope.launch {
+            store.saveProfile(id, name, scopeType, scopeFilter, intervalDays, preferredMovementType).fold(
+                onSuccess = { profile ->
+                    _feedback.value = "Rotina salva: ${profile.name} (a cada ${profile.intervalDays}d)."
+                },
+                onFailure = { err ->
+                    _feedback.value = err.localizedMessage ?: "Erro ao salvar rotina de balança."
+                }
+            )
+        }
+    }
+
+    fun deleteReconciliationProfile(profileId: String) {
+        val store = scaleReconciliationStore ?: return
+        viewModelScope.launch {
+            store.deleteProfile(profileId).fold(
+                onSuccess = { _feedback.value = "Rotina removida." },
+                onFailure = { err -> _feedback.value = err.localizedMessage ?: "Erro ao remover rotina." }
             )
         }
     }

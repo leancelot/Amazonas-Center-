@@ -25,12 +25,15 @@ import androidx.compose.material.icons.rounded.AcUnit
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowOutward
 import androidx.compose.material.icons.rounded.Badge
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CloudUpload
+import androidx.compose.material.icons.rounded.FactCheck
 import androidx.compose.material.icons.rounded.Inventory2
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.Scale
 import androidx.compose.material.icons.rounded.Thermostat
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Button
@@ -68,6 +71,7 @@ import com.example.data.BackupRestoreSummary
 import com.example.data.ChamberTempLog
 import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
+import com.example.data.PackSpecHelper
 import com.example.data.ReceivingSessionSummary
 import com.example.data.StaffRole
 import com.example.data.TemperatureZone
@@ -78,10 +82,13 @@ import com.example.notifications.ExpiryNotificationManager
 import com.example.ui.components.ChamberTemperatureSheet
 import com.example.ui.components.ExpiryAlertsSheet
 import com.example.ui.components.ExpiryUrgencyBadge
+import com.example.ui.components.FastStockClosureSheet
 import com.example.ui.components.ItemDetailSheet
 import com.example.ui.components.LocalBackupSheet
 import com.example.ui.components.MeatTypePill
+import com.example.ui.components.QuickCutStockOutSheet
 import com.example.ui.components.ReceivingSessionDetailSheet
+import com.example.ui.components.ScaleDifferenceAdjustmentSheet
 import com.example.ui.components.StockOutSheet
 import com.example.ui.components.TemperatureZonePill
 import com.example.ui.components.ThermalComplianceBadge
@@ -121,6 +128,9 @@ fun DashboardScreen(
     var showChamberTempSheet by remember { mutableStateOf(false) }
     var showExpiryAlertsSheet by remember { mutableStateOf(false) }
     var showBackupSheet by remember { mutableStateOf(false) }
+    var showQuickCutSheet by remember { mutableStateOf(false) }
+    var showFastClosureSheet by remember { mutableStateOf(false) }
+    var showScaleDifferenceSheet by remember { mutableStateOf(false) }
     var alertSettings by remember(context) {
         mutableStateOf(ExpiryNotificationManager.readSettings(context))
     }
@@ -246,6 +256,11 @@ fun DashboardScreen(
                     urgentItemsCount = state.expiredCount + state.due7DaysCount + state.due15DaysCount,
                     isLocalMode = isLocalMode,
                     backupSummary = state.backupSummary,
+                    canEditStock = state.activeRole.canEditReceivingOrStock && state.activeItems.isNotEmpty(),
+                    dueReconciliationCount = state.dueReconciliationCount,
+                    onOpenQuickCutStockOut = { showQuickCutSheet = true },
+                    onOpenFastClosure = { showFastClosureSheet = true },
+                    onOpenScaleDifference = { showScaleDifferenceSheet = true },
                     onOpenChamberTemp = { showChamberTempSheet = true },
                     onOpenExpiryAlerts = { showExpiryAlertsSheet = true },
                     onOpenLocalBackup = { showBackupSheet = true }
@@ -474,6 +489,44 @@ fun DashboardScreen(
             onDismiss = { showBackupSheet = false }
         )
     }
+
+    if (showQuickCutSheet) {
+        QuickCutStockOutSheet(
+            activeItems = state.activeItems,
+            onDismiss = { showQuickCutSheet = false },
+            onConfirmAllocations = { group, movementType, allocations, reason ->
+                viewModel.recordCutStockOutFefo(group, movementType, allocations, reason)
+                showQuickCutSheet = false
+            }
+        )
+    }
+
+    if (showFastClosureSheet) {
+        FastStockClosureSheet(
+            activeItems = state.activeItems,
+            onDismiss = { showFastClosureSheet = false },
+            onApplyClosure = { plan ->
+                viewModel.applyFastStockClosure(plan)
+                showFastClosureSheet = false
+            }
+        )
+    }
+
+    if (showScaleDifferenceSheet) {
+        ScaleDifferenceAdjustmentSheet(
+            activeItems = state.activeItems,
+            profiles = state.reconciliationProfiles,
+            records = state.reconciliationRecords,
+            allMovements = state.allMovements,
+            onDismiss = { showScaleDifferenceSheet = false },
+            onApplyDifference = { plan ->
+                viewModel.applyScaleDifferencePlan(plan)
+                showScaleDifferenceSheet = false
+            },
+            onSaveProfile = viewModel::saveReconciliationProfile,
+            onDeleteProfile = viewModel::deleteReconciliationProfile
+        )
+    }
 }
 
 @Composable
@@ -484,11 +537,174 @@ private fun DailyOperationalToolsSection(
     urgentItemsCount: Int,
     isLocalMode: Boolean,
     backupSummary: BackupRestoreSummary?,
+    canEditStock: Boolean,
+    dueReconciliationCount: Int,
+    onOpenQuickCutStockOut: () -> Unit,
+    onOpenFastClosure: () -> Unit,
+    onOpenScaleDifference: () -> Unit,
     onOpenChamberTemp: () -> Unit,
     onOpenExpiryAlerts: () -> Unit,
     onOpenLocalBackup: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (canEditStock) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Card(
+                    onClick = onOpenQuickCutStockOut,
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("dashboard_quick_cut_card")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Bolt,
+                            contentDescription = "Saída rápida por corte",
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Saída Rápida",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "1 toque / FEFO",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                Card(
+                    onClick = onOpenFastClosure,
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("dashboard_fast_closure_card")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.FactCheck,
+                            contentDescription = "Fechamento rápido por sobra",
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Fechamento",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "Informar sobra",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.85f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+
+            OutlinedCard(
+                onClick = onOpenScaleDifference,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("dashboard_scale_difference_card")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.size(44.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Rounded.Scale,
+                                contentDescription = "Ajuste de estoque por diferença",
+                                tint = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        }
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "Ajuste por Diferença (Balança)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (dueReconciliationCount > 0) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.errorContainer,
+                                    shape = RoundedCornerShape(999.dp)
+                                ) {
+                                    Text(
+                                        text = "$dueReconciliationCount pendente(s)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            text = "Informe o peso atual na balança e calcule a quebra (Friesul ~7d, Bairro de Fátima ~1d).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Text(
+                        text = "Conferir",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
         OutlinedCard(
             onClick = onOpenChamberTemp,
             modifier = Modifier
@@ -1003,9 +1219,13 @@ private fun FefoPriorityItemCard(
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
+                    val packSpec = remember(item.notes) { PackSpecHelper.parse(item.notes) }
                     Text(
                         text = buildString {
                             append("${item.chamberName} • ${DateUtils.formatTemp(item.measuredTempCelsius)}")
+                            if (packSpec != null && packSpec.remainingCount > 0) {
+                                append(" • ${packSpec.formatSummary(item.unitEnum)}")
+                            }
                             if (item.batchCode.isNotBlank()) append(" • Lote ${item.batchCode}")
                             if (item.supplierName.isNotBlank()) append("\n${item.supplierName}")
                         },

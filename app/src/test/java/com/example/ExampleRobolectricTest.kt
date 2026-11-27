@@ -5,10 +5,19 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.data.ChamberTempLogStore
 import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
+import com.example.data.FastClosureCutEntry
+import com.example.data.FefoStockAllocationEngine
 import com.example.data.LocalColdStorageRepository
 import com.example.data.MeatType
 import com.example.data.MeasurementUnit
+import com.example.data.MovementType
+import com.example.data.PackSpecHelper
+import com.example.data.PackUnitType
 import com.example.data.ReceivingSessionEntity
+import com.example.data.ReconciliationCadenceStatus
+import com.example.data.ReconciliationScopeType
+import com.example.data.ScaleReconciliationEngine
+import com.example.data.ScaleReconciliationStore
 import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
 import com.example.domain.invoice.InvoiceAiExtractor
@@ -20,6 +29,7 @@ import com.example.notifications.ExpiryNotificationManager
 import com.example.ui.auth.AuthDeviceContext
 import com.example.ui.auth.AuthFailureCategory
 import com.example.ui.auth.GoogleAuthExceptionHandler
+import com.example.ui.auth.chooseMoreInformativeThrowable
 import com.example.ui.viewmodel.DashboardViewModel
 import com.example.ui.viewmodel.InventoryViewModel
 import com.example.ui.viewmodel.ReceivingViewModel
@@ -211,7 +221,7 @@ class ExampleRobolectricTest {
             )
         )
 
-        val dashboardVm = DashboardViewModel(repository, tempStore, context)
+        val dashboardVm = DashboardViewModel(repository, tempStore, appContext = context)
         dashboardVm.recordChamberTemperature(
             chamberName = "Congelado",
             zone = TemperatureZone.CONGELADO,
@@ -289,6 +299,9 @@ class ExampleRobolectricTest {
         assertEquals(AuthFailureCategory.NO_CREDENTIAL, GoogleAuthExceptionHandler.classify(noCred))
         assertTrue(GoogleAuthExceptionHandler.shouldAttemptFallback(noCred))
 
+        val selected = chooseMoreInformativeThrowable(wrapped, noCred)
+        assertEquals(wrapped, selected)
+
         val deviceCtx = AuthDeviceContext(
             buildType = "Release",
             packageName = "com.aistudio.frigstock.krmvqt",
@@ -316,6 +329,253 @@ class ExampleRobolectricTest {
         assertTrue(report.technicalLog.contains("GetCredentialCancellationException"))
         assertTrue(report.technicalLog.contains("16: Account reauth failed."))
         assertTrue(report.technicalLog.contains("Test trace"))
+    }
+
+    @Test
+    fun `pack metadata and cut-level FEFO 1-tap exit and fast closure allocate earliest expiry lots first`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = LocalColdStorageRepository(context)
+        runBlocking {
+            repo.clearAllLocalData()
+
+            val lot1Notes = PackSpecHelper.applyPackMetadata(
+                userNotes = "Vácuo íntegro",
+                packCount = 2,
+                packType = PackUnitType.CAIXA,
+                totalQuantity = 40.0,
+                unit = MeasurementUnit.KG
+            )
+            assertEquals("Vácuo íntegro", PackSpecHelper.stripMetadata(lot1Notes))
+
+            val lot2Notes = PackSpecHelper.applyPackMetadata(
+                userNotes = "",
+                packCount = 3,
+                packType = PackUnitType.CAIXA,
+                totalQuantity = 60.0,
+                unit = MeasurementUnit.KG
+            )
+
+            repo.saveReceivingSession(
+                session = ReceivingSessionEntity(
+                    invoiceNumber = "901",
+                    supplierName = "Frigo FEFO",
+                    receivedAtMillis = System.currentTimeMillis() - 10_000L
+                ),
+                items = listOf(
+                    ColdStorageItemEntity(
+                        meatType = MeatType.BOVINA.name,
+                        cutName = "Picanha",
+                        initialQuantity = 40.0,
+                        currentQuantity = 40.0,
+                        unit = MeasurementUnit.KG.name,
+                        expiryDateEpochDay = DateUtils.addDaysToTodayEpochDay(2),
+                        notes = lot1Notes
+                    ),
+                    ColdStorageItemEntity(
+                        meatType = MeatType.BOVINA.name,
+                        cutName = "Alcatra",
+                        initialQuantity = 30.0,
+                        currentQuantity = 30.0,
+                        unit = MeasurementUnit.KG.name,
+                        expiryDateEpochDay = DateUtils.addDaysToTodayEpochDay(3)
+                    )
+                )
+            ).getOrThrow()
+
+            repo.saveReceivingSession(
+                session = ReceivingSessionEntity(
+                    invoiceNumber = "902",
+                    supplierName = "Frigo FEFO 2",
+                    receivedAtMillis = System.currentTimeMillis()
+                ),
+                items = listOf(
+                    ColdStorageItemEntity(
+                        meatType = MeatType.BOVINA.name,
+                        cutName = "Picanha",
+                        initialQuantity = 60.0,
+                        currentQuantity = 60.0,
+                        unit = MeasurementUnit.KG.name,
+                        expiryDateEpochDay = DateUtils.addDaysToTodayEpochDay(10),
+                        notes = lot2Notes
+                    )
+                )
+            ).getOrThrow()
+
+            val active = repo.activeItemsFefo.first()
+            val groups = FefoStockAllocationEngine.groupActiveItemsByCut(active)
+            assertEquals(2, groups.size)
+
+            val picanhaGroup = groups.first { it.cutName == "Picanha" }
+            assertEquals(100.0, picanhaGroup.totalQuantity, 0.01)
+            assertEquals(5, picanhaGroup.totalRemainingPacks)
+            assertEquals(PackUnitType.CAIXA, picanhaGroup.primaryPackType)
+
+            // 1) Deduct 3 boxes -> should take 2 boxes (40 kg) from lot1 + 1 box (20 kg) from lot2
+            val packAllocations = FefoStockAllocationEngine.planPackDeduction(picanhaGroup.lots, packsToDeduct = 3)
+            assertEquals(2, packAllocations.size)
+            assertEquals(40.0, packAllocations[0].deductQuantity, 0.01)
+            assertEquals(0.0, packAllocations[0].remainingAfter, 0.01)
+            assertEquals(20.0, packAllocations[1].deductQuantity, 0.01)
+            assertEquals(40.0, packAllocations[1].remainingAfter, 0.01)
+            assertEquals(2, PackSpecHelper.parse(packAllocations[1].updatedNotes)?.remainingCount)
+
+            val vm = InventoryViewModel(repo)
+            vm.recordCutStockOutFefo(picanhaGroup, MovementType.SAIDA_BALCAO, packAllocations, "Saída rápida: 3 cx")
+            vm.uiState.awaitMatching { state ->
+                state.activeItems.firstOrNull { it.cutName == "Picanha" }?.currentQuantity?.let { qty ->
+                    kotlin.math.abs(qty - 40.0) < 0.05
+                } == true && state.activeItems.count { it.cutName == "Picanha" } == 1
+            }
+
+            // 2) Fast end-of-day closure: Picanha left = 15 kg (deduct 25 kg), Alcatra left = 10 kg (deduct 20 kg)
+            val afterPackGroups = FefoStockAllocationEngine.groupActiveItemsByCut(repo.activeItemsFefo.first())
+            val picanhaAfter = afterPackGroups.first { it.cutName == "Picanha" }
+            val alcatraAfter = afterPackGroups.first { it.cutName == "Alcatra" }
+
+            val closurePlan = FefoStockAllocationEngine.planFastClosure(
+                entries = listOf(
+                    FastClosureCutEntry(picanhaAfter, countedRemaining = 15.0),
+                    FastClosureCutEntry(alcatraAfter, countedRemaining = 10.0)
+                ),
+                movementType = MovementType.SAIDA_BALCAO
+            )
+            assertEquals(2, closurePlan.affectedCutCount)
+            assertEquals(45.0, closurePlan.totalDeductedKg, 0.01)
+
+            vm.applyFastStockClosure(closurePlan)
+            val finalState = vm.uiState.awaitMatching { state ->
+                val picQty = state.activeItems.filter { it.cutName == "Picanha" }.sumOf { it.currentQuantity }
+                val alcQty = state.activeItems.filter { it.cutName == "Alcatra" }.sumOf { it.currentQuantity }
+                kotlin.math.abs(picQty - 15.0) < 0.05 && kotlin.math.abs(alcQty - 10.0) < 0.05
+            }
+            assertEquals(2, finalState.activeItems.size)
+            val movements = repo.allMovements.first()
+            assertTrue(movements.any { it.movementTypeEnum == MovementType.SAIDA_BALCAO && it.cutNameSnapshot == "Picanha" })
+        }
+    }
+
+    @Test
+    fun `scale difference adjustment matches Friesul and Bairro de Fatima calculates shrinkage FEFO and updates cadence`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = LocalColdStorageRepository(context)
+        val scaleStore = ScaleReconciliationStore(context)
+        runBlocking {
+            repo.clearAllLocalData()
+            scaleStore.clearRecordsOnly()
+
+            val profiles = scaleStore.profiles.first()
+            val friesulProfile = profiles.first { it.id == "friesul_semanal" }
+            val fatimaProfile = profiles.first { it.id == "bairro_fatima_diario" }
+            val geralProfile = profiles.first { it.id == "camara_geral_semanal" }
+            assertEquals(7, friesulProfile.intervalDays)
+            assertEquals(1, fatimaProfile.intervalDays)
+            assertEquals(7, geralProfile.intervalDays)
+
+            repo.saveReceivingSession(
+                session = ReceivingSessionEntity(
+                    invoiceNumber = "1201",
+                    supplierName = "FRIESUL Alimentos",
+                    receivedAtMillis = System.currentTimeMillis() - 5_000L
+                ),
+                items = listOf(
+                    ColdStorageItemEntity(
+                        meatType = MeatType.AVES.name,
+                        cutName = "Peito de Frango",
+                        supplierName = "FRIESUL Alimentos",
+                        chamberName = "Resfriado",
+                        initialQuantity = 40.0,
+                        currentQuantity = 40.0,
+                        unit = MeasurementUnit.KG.name,
+                        unitCostBrl = 15.0,
+                        expiryDateEpochDay = DateUtils.addDaysToTodayEpochDay(2)
+                    ),
+                    ColdStorageItemEntity(
+                        meatType = MeatType.AVES.name,
+                        cutName = "Coxa e Sobrecoxa",
+                        supplierName = "FRIESUL Alimentos",
+                        chamberName = "Bairro de Fatima",
+                        initialQuantity = 60.0,
+                        currentQuantity = 60.0,
+                        unit = MeasurementUnit.KG.name,
+                        unitCostBrl = 12.0,
+                        expiryDateEpochDay = DateUtils.addDaysToTodayEpochDay(6)
+                    )
+                )
+            ).getOrThrow()
+
+            val vm = DashboardViewModel(repo, scaleReconciliationStore = scaleStore)
+            val initialState = vm.uiState.awaitMatching { it.activeItems.size == 2 }
+            assertEquals(3, initialState.dueReconciliationCount)
+
+            // Check Friesul (40 + 60 = 100 kg expected); scale reads 95 kg -> 5 kg shrinkage (5.0%)
+            val friesulPlan = ScaleReconciliationEngine.planScaleDifference(
+                items = initialState.activeItems,
+                profileId = friesulProfile.id,
+                profileName = friesulProfile.name,
+                scopeType = friesulProfile.scopeTypeEnum,
+                scopeFilter = friesulProfile.scopeFilter,
+                scaleWeightKg = 95.0,
+                movementType = MovementType.PERDA_APARA
+            )
+            assertEquals(100.0, friesulPlan.expectedKg, 0.01)
+            assertEquals(5.0, friesulPlan.differenceKg, 0.01)
+            assertEquals(5.0, friesulPlan.shrinkagePercent, 0.01)
+            assertEquals(75.0, friesulPlan.estimatedLossBrl, 0.01) // Deducted from earliest lot (Peito R$ 15/kg)
+            assertTrue(friesulPlan.isLossOrOutflow)
+
+            vm.applyScaleDifferencePlan(friesulPlan)
+            val afterFriesul = vm.uiState.awaitMatching { state ->
+                val peito = state.activeItems.firstOrNull { it.cutName == "Peito de Frango" }
+                peito != null && kotlin.math.abs(peito.currentQuantity - 35.0) < 0.05 && state.reconciliationRecords.isNotEmpty()
+            }
+            val updatedFriesulProfile = afterFriesul.reconciliationProfiles.first { it.id == "friesul_semanal" }
+            assertEquals(ReconciliationCadenceStatus.ON_TRACK, updatedFriesulProfile.evaluateStatus(afterFriesul.allMovements).status)
+
+            // Check Bairro de Fátima (accent-insensitive match with "Bairro de Fatima"): 60 kg expected -> scale 57 kg -> 5% shrinkage
+            val fatimaPlan = ScaleReconciliationEngine.planScaleDifference(
+                items = afterFriesul.activeItems,
+                profileId = fatimaProfile.id,
+                profileName = fatimaProfile.name,
+                scopeType = ReconciliationScopeType.CHAMBER,
+                scopeFilter = fatimaProfile.scopeFilter,
+                scaleWeightKg = 57.0,
+                movementType = MovementType.PERDA_APARA
+            )
+            assertEquals(60.0, fatimaPlan.expectedKg, 0.01)
+            assertEquals(3.0, fatimaPlan.differenceKg, 0.01)
+            assertEquals(5.0, fatimaPlan.shrinkagePercent, 0.01)
+
+            vm.applyScaleDifferencePlan(fatimaPlan)
+            val afterFatima = vm.uiState.awaitMatching { state ->
+                val coxa = state.activeItems.firstOrNull { it.cutName == "Coxa e Sobrecoxa" }
+                coxa != null && kotlin.math.abs(coxa.currentQuantity - 57.0) < 0.05 && state.reconciliationRecords.size >= 2
+            }
+            val updatedFatimaProfile = afterFatima.reconciliationProfiles.first { it.id == "bairro_fatima_diario" }
+            assertEquals(ReconciliationCadenceStatus.ON_TRACK, updatedFatimaProfile.evaluateStatus(afterFatima.allMovements).status)
+            assertEquals(1, afterFatima.dueReconciliationCount)
+
+            // Check Câmara Geral (ALL_KG): 35 + 57 = 92 kg expected -> scale reads 94 kg -> +2 kg surplus
+            val geralPlan = ScaleReconciliationEngine.planScaleDifference(
+                items = afterFatima.activeItems,
+                profileId = geralProfile.id,
+                profileName = geralProfile.name,
+                scopeType = geralProfile.scopeTypeEnum,
+                scopeFilter = geralProfile.scopeFilter,
+                scaleWeightKg = 94.0,
+                movementType = MovementType.PERDA_APARA
+            )
+            assertEquals(92.0, geralPlan.expectedKg, 0.01)
+            assertEquals(-2.0, geralPlan.differenceKg, 0.01)
+            assertTrue(geralPlan.isSurplus)
+            assertEquals(2.0, geralPlan.surplusAddKg, 0.01)
+
+            vm.applyScaleDifferencePlan(geralPlan)
+            val afterGeral = vm.uiState.awaitMatching { state ->
+                val totalKg = state.activeItems.sumOf { it.currentQuantity }
+                kotlin.math.abs(totalKg - 94.0) < 0.05 && state.reconciliationRecords.size >= 3
+            }
+            assertEquals(0, afterGeral.dueReconciliationCount)
+        }
     }
 
     private fun <T> StateFlow<T>.awaitMatching(

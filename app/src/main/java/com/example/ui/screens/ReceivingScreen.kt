@@ -97,6 +97,7 @@ import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
 import com.example.data.ReceivingSessionSummary
 import com.example.data.TemperatureZone
+import com.example.data.PackUnitType
 import com.example.data.ThermalCompliance
 import com.example.domain.invoice.ParsedInvoiceItemDraft
 import com.example.ui.components.ExpiryUrgencyBadge
@@ -146,6 +147,8 @@ fun ReceivingScreen(
     var qTempText by remember { mutableStateOf("2.0") }
     var qQtyText by remember { mutableStateOf("") }
     var qUnit by remember { mutableStateOf(com.example.data.MeasurementUnit.KG) }
+    var qPackCountText by remember { mutableStateOf("") }
+    var qPackUnit by remember { mutableStateOf(PackUnitType.CAIXA) }
     var qBatch by remember { mutableStateOf("") }
     var qExpiryEpochDay by remember { mutableLongStateOf(DateUtils.addDaysToTodayEpochDay(7)) }
     var qShowDateDialog by remember { mutableStateOf(false) }
@@ -163,6 +166,7 @@ fun ReceivingScreen(
         if (success != null && success.message.startsWith("Recebimento salvo!")) {
             qCutName = ""
             qQtyText = ""
+            qPackCountText = ""
             qBatch = ""
             qErrorMsg = null
         }
@@ -236,6 +240,11 @@ fun ReceivingScreen(
     fun commitPendingQuickItemIfEntered(): Boolean {
         val qty = qQtyText.replace(',', '.').toDoubleOrNull()
         val temp = qTempText.replace(',', '.').toDoubleOrNull() ?: qZone.defaultTempCelsius
+        val packs = if (qUnit == com.example.data.MeasurementUnit.KG) {
+            qPackCountText.toIntOrNull()?.coerceAtLeast(0) ?: 0
+        } else {
+            0
+        }
         if (qty != null && qty > 0.0) {
             viewModel.addQuickEntryItem(
                 supplier = formState.supplierName.trim(),
@@ -248,9 +257,12 @@ fun ReceivingScreen(
                 quantity = qty,
                 unit = qUnit,
                 batch = qBatch.trim(),
-                expiryEpochDay = qExpiryEpochDay
+                expiryEpochDay = qExpiryEpochDay,
+                packCount = packs,
+                packUnit = qPackUnit
             )
             qQtyText = ""
+            qPackCountText = ""
             qBatch = ""
             qCutName = ""
             return true
@@ -261,6 +273,7 @@ fun ReceivingScreen(
     fun clearQuickFieldsAfterQueueOrSave() {
         qCutName = ""
         qQtyText = ""
+        qPackCountText = ""
         qBatch = ""
         qErrorMsg = null
     }
@@ -625,6 +638,64 @@ fun ReceivingScreen(
                                         }
                                     }
 
+                                    if (qUnit == com.example.data.MeasurementUnit.KG) {
+                                        val qParsedQty = qQtyText.replace(',', '.').toDoubleOrNull() ?: 0.0
+                                        val qParsedPacks = qPackCountText.toIntOrNull() ?: 0
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            OutlinedTextField(
+                                                value = qPackCountText,
+                                                onValueChange = { raw -> qPackCountText = raw.filter { it.isDigit() }.take(4) },
+                                                label = { Text("Volumes (cx/pç opc.)") },
+                                                placeholder = { Text("Ex.: 3") },
+                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("quick_pack_count_input")
+                                            )
+                                            FlowRow(
+                                                modifier = Modifier.weight(1f),
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                PackUnitType.entries.forEach { pType ->
+                                                    FilterChip(
+                                                        selected = qPackUnit == pType,
+                                                        onClick = { qPackUnit = pType },
+                                                        label = { Text(pType.pluralLabel) }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            listOf(1, 2, 3, 5, 10).forEach { presetPacks ->
+                                                FilterChip(
+                                                    selected = qParsedPacks == presetPacks,
+                                                    onClick = { qPackCountText = presetPacks.toString() },
+                                                    label = { Text("$presetPacks ${qPackUnit.shortLabel}") }
+                                                )
+                                            }
+                                            if (qPackCountText.isNotEmpty()) {
+                                                FilterChip(
+                                                    selected = false,
+                                                    onClick = { qPackCountText = "" },
+                                                    label = { Text("Limpar") }
+                                                )
+                                            }
+                                        }
+                                        if (qParsedQty > 0.0 && qParsedPacks > 0) {
+                                            val avgPackKg = qParsedQty / qParsedPacks.toDouble()
+                                            Text(
+                                                text = "Média de saída: ~${String.format(Locale.forLanguageTag("pt-BR"), "%.1f", avgPackKg)} kg/${qPackUnit.shortLabel} (baixa em 1 toque)",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.secondary
+                                            )
+                                        }
+                                    }
+
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -719,6 +790,11 @@ fun ReceivingScreen(
                                             when {
                                                 qty == null || qty <= 0.0 -> qErrorMsg = "Informe o peso da balança ou quantidade para adicionar."
                                                 else -> {
+                                                    val packs = if (qUnit == com.example.data.MeasurementUnit.KG) {
+                                                        qPackCountText.toIntOrNull()?.coerceAtLeast(0) ?: 0
+                                                    } else {
+                                                        0
+                                                    }
                                                     viewModel.addQuickEntryItem(
                                                         supplier = formState.supplierName.trim(),
                                                         invoiceNum = formState.invoiceNumber.trim(),
@@ -730,9 +806,12 @@ fun ReceivingScreen(
                                                         quantity = qty,
                                                         unit = qUnit,
                                                         batch = qBatch.trim(),
-                                                        expiryEpochDay = qExpiryEpochDay
+                                                        expiryEpochDay = qExpiryEpochDay,
+                                                        packCount = packs,
+                                                        packUnit = qPackUnit
                                                     )
                                                     qQtyText = ""
+                                                    qPackCountText = ""
                                                     qBatch = ""
                                                     qCutName = ""
                                                     Toast.makeText(context, "Corte adicionado! Informe o próximo da entrega.", Toast.LENGTH_SHORT).show()
@@ -1508,6 +1587,9 @@ private fun DraftItemCard(
                         text = buildString {
                             append(item.chamberName)
                             if (hasDistinctTemp) append(" • ${DateUtils.formatTemp(item.measuredTempCelsius)}")
+                            if (item.packCount > 0 && item.unit == com.example.data.MeasurementUnit.KG) {
+                                append(" • ${item.packCount} ${item.packUnit.shortLabel}")
+                            }
                             if (item.batchCode.isNotBlank()) append(" • Lote ${item.batchCode}")
                             if (item.sifCode.isNotBlank()) append(" • SIF ${item.sifCode}")
                         },

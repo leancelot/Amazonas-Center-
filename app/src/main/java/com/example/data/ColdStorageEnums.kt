@@ -114,6 +114,7 @@ enum class TemperatureZone(
         val defaultChambers: List<String> = listOf(
             "Resfriado",
             "Congelado",
+            "Bairro de Fátima",
             "Maturação",
             "Balcão Refrigerado"
         )

@@ -19,10 +19,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowOutward
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.FactCheck
+import androidx.compose.material.icons.rounded.Scale
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -45,16 +50,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
 import com.example.data.MeatType
+import com.example.data.PackSpecHelper
 import com.example.data.TemperatureZone
 import com.example.ui.components.ExpiryUrgencyBadge
+import com.example.ui.components.FastStockClosureSheet
 import com.example.ui.components.ItemDetailSheet
 import com.example.ui.components.MeatTypePill
+import com.example.ui.components.QuickCutStockOutSheet
+import com.example.ui.components.ScaleDifferenceAdjustmentSheet
 import com.example.ui.components.StockOutSheet
 import com.example.ui.components.TemperatureZonePill
 import com.example.ui.theme.JetBrainsMonoFamily
@@ -71,6 +81,9 @@ fun InventoryScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var selectedItem by remember { mutableStateOf<ColdStorageItemEntity?>(null) }
     var stockOutItem by remember { mutableStateOf<ColdStorageItemEntity?>(null) }
+    var showQuickCutSheet by remember { mutableStateOf(false) }
+    var showFastClosureSheet by remember { mutableStateOf(false) }
+    var showScaleDifferenceSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.feedbackMessage) {
         state.feedbackMessage?.let { msg ->
@@ -111,6 +124,50 @@ fun InventoryScreen(
                         style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
                         color = MaterialTheme.colorScheme.secondary
                     )
+                }
+
+                if (state.activeRole.canEditReceivingOrStock && state.activeItems.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Button(
+                            onClick = { showQuickCutSheet = true },
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("inventory_quick_cut_stock_out_button")
+                        ) {
+                            Icon(Icons.Rounded.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Saída", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        FilledTonalButton(
+                            onClick = { showFastClosureSheet = true },
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("inventory_fast_closure_button")
+                        ) {
+                            Icon(Icons.Rounded.FactCheck, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Sobra", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        OutlinedButton(
+                            onClick = { showScaleDifferenceSheet = true },
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            modifier = Modifier
+                                .weight(1.1f)
+                                .height(48.dp)
+                                .testTag("inventory_scale_difference_button")
+                        ) {
+                            Icon(Icons.Rounded.Scale, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Diferença", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
                 }
 
                 OutlinedTextField(
@@ -281,6 +338,44 @@ fun InventoryScreen(
             }
         )
     }
+
+    if (showQuickCutSheet) {
+        QuickCutStockOutSheet(
+            activeItems = state.activeItems,
+            onDismiss = { showQuickCutSheet = false },
+            onConfirmAllocations = { group, movementType, allocations, reason ->
+                viewModel.recordCutStockOutFefo(group, movementType, allocations, reason)
+                showQuickCutSheet = false
+            }
+        )
+    }
+
+    if (showFastClosureSheet) {
+        FastStockClosureSheet(
+            activeItems = state.activeItems,
+            onDismiss = { showFastClosureSheet = false },
+            onApplyClosure = { plan ->
+                viewModel.applyFastStockClosure(plan)
+                showFastClosureSheet = false
+            }
+        )
+    }
+
+    if (showScaleDifferenceSheet) {
+        ScaleDifferenceAdjustmentSheet(
+            activeItems = state.activeItems,
+            profiles = state.reconciliationProfiles,
+            records = state.reconciliationRecords,
+            allMovements = state.allMovements,
+            onDismiss = { showScaleDifferenceSheet = false },
+            onApplyDifference = { plan ->
+                viewModel.applyScaleDifferencePlan(plan)
+                showScaleDifferenceSheet = false
+            },
+            onSaveProfile = viewModel::saveReconciliationProfile,
+            onDeleteProfile = viewModel::deleteReconciliationProfile
+        )
+    }
 }
 
 @Composable
@@ -317,10 +412,14 @@ private fun InventoryLotCard(
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
+                    val packSpec = remember(item.notes) { PackSpecHelper.parse(item.notes) }
                     Text(
                         text = buildString {
                             append(item.chamberName)
                             append(" • ${DateUtils.formatTemp(item.measuredTempCelsius)}")
+                            if (packSpec != null && packSpec.remainingCount > 0) {
+                                append(" • ${packSpec.formatSummary(item.unitEnum)}")
+                            }
                             if (item.supplierName.isNotBlank()) append("\n${item.supplierName}")
                             if (item.invoiceNumber.isNotBlank()) append(" • NF ${item.invoiceNumber}")
                         },

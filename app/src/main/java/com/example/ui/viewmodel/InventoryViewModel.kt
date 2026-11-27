@@ -3,12 +3,24 @@ package com.example.ui.viewmodel
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.BatchStockOutRequest
 import com.example.data.ColdStorageItemEntity
 import com.example.data.ColdStorageRepository
+import com.example.data.CutFefoGroup
+import com.example.data.DateUtils
 import com.example.data.ExpiryUrgency
+import com.example.data.FastClosurePlan
+import com.example.data.FefoLotAllocation
 import com.example.data.MeatType
 import com.example.data.MeasurementUnit
 import com.example.data.MovementType
+import com.example.data.ReconciliationCadenceStatus
+import com.example.data.ReconciliationProfile
+import com.example.data.ReconciliationScopeType
+import com.example.data.ScaleDifferencePlan
+import com.example.data.ScaleReconciliationEngine
+import com.example.data.ScaleReconciliationRecord
+import com.example.data.ScaleReconciliationStore
 import com.example.data.ShopSessionState
 import com.example.data.StaffRole
 import com.example.data.StockMovementEntity
@@ -37,16 +49,22 @@ data class InventoryUiState(
     val selectedSupplier: String? = null,
     val urgencyFilter: UrgencyFilter = UrgencyFilter.ALL,
     val availableSuppliers: List<String> = emptyList(),
+    val activeItems: List<ColdStorageItemEntity> = emptyList(),
     val filteredItems: List<ColdStorageItemEntity> = emptyList(),
     val totalFilteredKg: Double = 0.0,
     val totalFilteredOtherUnits: Int = 0,
     val activeRole: StaffRole = StaffRole.OPERADOR,
+    val reconciliationProfiles: List<ReconciliationProfile> = emptyList(),
+    val reconciliationRecords: List<ScaleReconciliationRecord> = emptyList(),
+    val allMovements: List<StockMovementEntity> = emptyList(),
+    val dueReconciliationCount: Int = 0,
     val feedbackMessage: String? = null,
     val streamError: String? = null
 )
 
 class InventoryViewModel(
-    private val repository: ColdStorageRepository
+    private val repository: ColdStorageRepository,
+    private val scaleReconciliationStore: ScaleReconciliationStore? = null
 ) : ViewModel() {
 
     private val _searchQuery = MutableStateFlow("")
@@ -56,25 +74,52 @@ class InventoryViewModel(
     private val _urgencyFilter = MutableStateFlow(UrgencyFilter.ALL)
     private val _feedback = MutableStateFlow<String?>(null)
 
-    val uiState: StateFlow<InventoryUiState> = combine(
-        repository.activeItemsFefo,
-        repository.sessionState,
+    private val defaultProfilesFlow = MutableStateFlow(ScaleReconciliationStore.defaultProfiles())
+    private val profilesFlow: StateFlow<List<ReconciliationProfile>> =
+        scaleReconciliationStore?.profiles ?: defaultProfilesFlow
+
+    private val emptyRecordsFlow = MutableStateFlow<List<ScaleReconciliationRecord>>(emptyList())
+    private val recordsFlow: StateFlow<List<ScaleReconciliationRecord>> =
+        scaleReconciliationStore?.records ?: emptyRecordsFlow
+
+    private val filterInputsFlow = combine(
         _searchQuery,
         _selectedMeat,
         _selectedZone,
         _selectedSupplier,
-        _urgencyFilter,
+        _urgencyFilter
+    ) { query, meat, zone, supplier, urgency ->
+        FilterInputs(query, meat, zone, supplier, urgency)
+    }
+
+    private val reconciliationBundleFlow = combine(
+        repository.allMovements,
+        profilesFlow,
+        recordsFlow
+    ) { movements, profiles, records ->
+        Triple(movements, profiles, records)
+    }
+
+    private data class FilterInputs(
+        val query: String,
+        val meat: MeatType?,
+        val zone: TemperatureZone?,
+        val supplier: String?,
+        val urgency: UrgencyFilter
+    )
+
+    val uiState: StateFlow<InventoryUiState> = combine(
+        repository.activeItemsFefo,
+        repository.sessionState,
+        filterInputsFlow,
+        reconciliationBundleFlow,
         _feedback
-    ) { values ->
-        @Suppress("UNCHECKED_CAST")
-        val items = values[0] as List<ColdStorageItemEntity>
-        val session = values[1] as ShopSessionState
-        val query = values[2] as String
-        val meat = values[3] as MeatType?
-        val zone = values[4] as TemperatureZone?
-        val supplier = values[5] as String?
-        val urgency = values[6] as UrgencyFilter
-        val feedback = values[7] as String?
+    ) { items, session, filters, (movements, profiles, records), feedback ->
+        val query = filters.query
+        val meat = filters.meat
+        val zone = filters.zone
+        val supplier = filters.supplier
+        val urgency = filters.urgency
 
         val availableSuppliers = items.map { it.supplierName }.filter { it.isNotBlank() }.distinct().sorted()
 
@@ -109,6 +154,21 @@ class InventoryViewModel(
             .filter { it.unitEnum != MeasurementUnit.KG }
             .sumOf { it.currentQuantity.toInt() }
 
+        val now = System.currentTimeMillis()
+        val dueReconciliationCount = profiles.count { profile ->
+            val hasActiveKg = ScaleReconciliationEngine.filterMatchingLots(
+                items,
+                profile.scopeTypeEnum,
+                profile.scopeFilter
+            ).isNotEmpty()
+            if (!hasActiveKg) {
+                false
+            } else {
+                val st = profile.evaluateStatus(movements, now).status
+                st == ReconciliationCadenceStatus.DUE || st == ReconciliationCadenceStatus.NEVER_CHECKED
+            }
+        }
+
         InventoryUiState(
             searchQuery = query,
             selectedMeatType = meat,
@@ -116,10 +176,15 @@ class InventoryViewModel(
             selectedSupplier = supplier,
             urgencyFilter = urgency,
             availableSuppliers = availableSuppliers,
+            activeItems = items,
             filteredItems = filtered,
             totalFilteredKg = totalKg,
             totalFilteredOtherUnits = totalOtherUnits,
             activeRole = session.activeRole,
+            reconciliationProfiles = profiles,
+            reconciliationRecords = records,
+            allMovements = movements,
+            dueReconciliationCount = dueReconciliationCount,
             feedbackMessage = feedback,
             streamError = session.errorMessage
         )
@@ -190,6 +255,140 @@ class InventoryViewModel(
                 onFailure = { err ->
                     _feedback.value = friendlyFirestoreMessage(err, "Erro ao registrar baixa.")
                 }
+            )
+        }
+    }
+
+    fun recordCutStockOutFefo(
+        group: CutFefoGroup,
+        movementType: MovementType,
+        allocations: List<FefoLotAllocation>,
+        reason: String
+    ) {
+        if (allocations.isEmpty()) return
+        val requests = allocations.map { alloc ->
+            BatchStockOutRequest(
+                itemId = alloc.item.id,
+                movementType = movementType,
+                quantity = alloc.deductQuantity,
+                reason = reason,
+                updatedNotes = alloc.updatedNotes
+            )
+        }
+        val totalDeducted = allocations.sumOf { it.deductQuantity }
+        viewModelScope.launch {
+            repository.recordBatchStockOut(requests).fold(
+                onSuccess = { count ->
+                    _feedback.value = if (count > 0) {
+                        "Saída FEFO aplicada: -${DateUtils.formatWeightOrQty(totalDeducted, group.unit)} de ${group.cutName} em $count lote(s)."
+                    } else {
+                        "Não foi possível aplicar a saída FEFO."
+                    }
+                },
+                onFailure = { err ->
+                    _feedback.value = friendlyFirestoreMessage(err, "Erro ao registrar saída rápida FEFO.")
+                }
+            )
+        }
+    }
+
+    fun applyFastStockClosure(plan: FastClosurePlan) {
+        if (plan.requests.isEmpty()) return
+        viewModelScope.launch {
+            repository.recordBatchStockOut(plan.requests).fold(
+                onSuccess = { count ->
+                    _feedback.value = if (count > 0) {
+                        val ptBr = java.util.Locale.forLanguageTag("pt-BR")
+                        val qtyDesc = buildList {
+                            if (plan.totalDeductedKg > 0.0) {
+                                add("${String.format(ptBr, "%.2f", plan.totalDeductedKg)} kg")
+                            }
+                            if (plan.totalDeductedOtherUnits > 0) {
+                                add("${plan.totalDeductedOtherUnits} pç/cx")
+                            }
+                        }.joinToString(" + ")
+                        "Fechamento aplicado: $qtyDesc baixados em $count lote(s) (FEFO)."
+                    } else {
+                        "Nenhuma baixa aplicada no fechamento."
+                    }
+                },
+                onFailure = { err ->
+                    _feedback.value = friendlyFirestoreMessage(err, "Erro ao aplicar fechamento rápido.")
+                }
+            )
+        }
+    }
+
+    fun applyScaleDifferencePlan(plan: ScaleDifferencePlan) {
+        viewModelScope.launch {
+            val ptBr = java.util.Locale.forLanguageTag("pt-BR")
+            when {
+                plan.isLossOrOutflow -> {
+                    repository.recordBatchStockOut(plan.requests).fold(
+                        onSuccess = { count ->
+                            scaleReconciliationStore?.recordCheckResult(plan, count)
+                            _feedback.value = if (count > 0) {
+                                "Ajuste aplicado: -${String.format(ptBr, "%.2f", plan.differenceKg)} kg (${String.format(ptBr, "%.1f", plan.shrinkagePercent)}% quebra) em $count lote(s)."
+                            } else {
+                                "Nenhum lote alterado."
+                            }
+                        },
+                        onFailure = { err ->
+                            _feedback.value = friendlyFirestoreMessage(err, "Erro ao aplicar ajuste por diferença.")
+                        }
+                    )
+                }
+                plan.isSurplus && plan.surplusTargetLot != null -> {
+                    val reason = "[Rotina:${plan.profileId}] Ajuste balança (${plan.profileName}): sobra +${String.format(ptBr, "%.2f", plan.surplusAddKg)} kg"
+                    repository.recordPositiveStockAdjustment(plan.surplusTargetLot.id, plan.surplusAddKg, reason).fold(
+                        onSuccess = { ok ->
+                            if (ok) scaleReconciliationStore?.recordCheckResult(plan, 1)
+                            _feedback.value = if (ok) {
+                                "Ajuste positivo registrado: +${String.format(ptBr, "%.2f", plan.surplusAddKg)} kg na balança."
+                            } else {
+                                "Não foi possível aplicar o ajuste positivo."
+                            }
+                        },
+                        onFailure = { err ->
+                            _feedback.value = friendlyFirestoreMessage(err, "Erro ao registrar sobra na balança.")
+                        }
+                    )
+                }
+                else -> {
+                    scaleReconciliationStore?.recordCheckResult(plan, 0)
+                    _feedback.value = "Conferência registrada (${plan.profileName}): estoque 100% exato (0% quebra)."
+                }
+            }
+        }
+    }
+
+    fun saveReconciliationProfile(
+        id: String?,
+        name: String,
+        scopeType: ReconciliationScopeType,
+        scopeFilter: String,
+        intervalDays: Int,
+        preferredMovementType: MovementType
+    ) {
+        val store = scaleReconciliationStore ?: return
+        viewModelScope.launch {
+            store.saveProfile(id, name, scopeType, scopeFilter, intervalDays, preferredMovementType).fold(
+                onSuccess = { profile ->
+                    _feedback.value = "Rotina salva: ${profile.name} (a cada ${profile.intervalDays}d)."
+                },
+                onFailure = { err ->
+                    _feedback.value = err.localizedMessage ?: "Erro ao salvar rotina de balança."
+                }
+            )
+        }
+    }
+
+    fun deleteReconciliationProfile(profileId: String) {
+        val store = scaleReconciliationStore ?: return
+        viewModelScope.launch {
+            store.deleteProfile(profileId).fold(
+                onSuccess = { _feedback.value = "Rotina removida." },
+                onFailure = { err -> _feedback.value = err.localizedMessage ?: "Erro ao remover rotina." }
             )
         }
     }

@@ -4,6 +4,7 @@ import com.example.data.DateUtils
 import com.example.data.InvoiceSourceType
 import com.example.data.MeatType
 import com.example.data.MeasurementUnit
+import com.example.data.PackUnitType
 import com.example.data.TemperatureZone
 import java.util.UUID
 
@@ -33,7 +34,9 @@ data class ParsedInvoiceItemDraft(
     val batchCode: String = "",
     val sifCode: String = "",
     val expiryEpochDay: Long = DateUtils.addDaysToTodayEpochDay(MeatType.BOVINA.defaultChilledDays),
-    val notes: String = ""
+    val notes: String = "",
+    val packCount: Int = 0,
+    val packUnit: PackUnitType = PackUnitType.CAIXA
 )
 
 object MeatCatalogMatcher {

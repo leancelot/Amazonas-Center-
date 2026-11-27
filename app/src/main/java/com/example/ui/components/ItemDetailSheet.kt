@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
+import com.example.data.PackSpecHelper
 import com.example.data.StaffRole
 import com.example.data.StockMovementEntity
 import com.example.data.TemperatureZone
@@ -130,6 +131,10 @@ fun ItemDetailSheet(
                         LotDetailLine("Câmara atual", item.chamberName)
                         LotDetailLine("Validade", DateUtils.formatEpochDay(item.expiryDateEpochDay))
                         LotDetailLine("Recebido em", DateUtils.formatDateTime(item.receivedAtMillis))
+                        val packSpec = remember(item.notes) { PackSpecHelper.parse(item.notes) }
+                        if (packSpec != null && packSpec.remainingCount > 0) {
+                            LotDetailLine("Volumes restantes", packSpec.formatSummary(item.unitEnum))
+                        }
                         if (item.supplierName.isNotBlank()) LotDetailLine("Fornecedor", item.supplierName)
                         if (item.invoiceNumber.isNotBlank()) LotDetailLine("Nota Fiscal", item.invoiceNumber)
                         if (item.batchCode.isNotBlank()) LotDetailLine("Lote", item.batchCode)
@@ -137,7 +142,8 @@ fun ItemDetailSheet(
                         if (item.unitCostBrl > 0.0) {
                             LotDetailLine("Custo unitário", DateUtils.formatCurrencyBrl(item.unitCostBrl))
                         }
-                        if (item.notes.isNotBlank()) LotDetailLine("Observações", item.notes)
+                        val cleanNotes = remember(item.notes) { PackSpecHelper.stripMetadata(item.notes) }
+                        if (cleanNotes.isNotBlank()) LotDetailLine("Observações", cleanNotes)
                     }
                 }
 
@@ -159,13 +165,34 @@ fun ItemDetailSheet(
                                         selected = newZone == z,
                                         onClick = {
                                             newZone = z
-                                            newChamber = z.defaultChamber
+                                            val isGenericChamber = TemperatureZone.entries.any {
+                                                it.defaultChamber.equals(newChamber.trim(), ignoreCase = true)
+                                            }
+                                            if (newChamber.isBlank() || isGenericChamber) {
+                                                newChamber = z.defaultChamber
+                                            }
                                             newTempText = String.format(Locale.US, "%.1f", z.defaultTempCelsius)
                                         },
                                         label = { Text(z.displayName) }
                                     )
                                 }
                             }
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                TemperatureZone.defaultChambers.forEach { preset ->
+                                    FilterChip(
+                                        selected = newChamber.trim().equals(preset, ignoreCase = true),
+                                        onClick = { newChamber = preset },
+                                        label = { Text(preset) }
+                                    )
+                                }
+                            }
+                            OutlinedTextField(
+                                value = newChamber,
+                                onValueChange = { newChamber = it },
+                                label = { Text("Câmara / Unidade de destino") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
                             OutlinedTextField(
                                 value = newTempText,
                                 onValueChange = { newTempText = ReceivingViewModel.sanitizeTemperatureInput(it) },

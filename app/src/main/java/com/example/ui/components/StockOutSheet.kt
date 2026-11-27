@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
 import com.example.data.MovementType
+import com.example.data.PackSpecHelper
 import com.example.ui.theme.JetBrainsMonoFamily
 import java.util.Locale
 
@@ -108,6 +109,39 @@ fun StockOutSheet(
                     .fillMaxWidth()
                     .testTag("stock_out_quantity_input")
             )
+
+            val packSpec = remember(item.notes) { PackSpecHelper.parse(item.notes) }
+            if (packSpec != null && packSpec.remainingCount > 0 && packSpec.avgWeightPerPack > 0.0) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val packCounts = listOf(1, 2).filter { it <= packSpec.remainingCount }
+                    packCounts.forEach { packs ->
+                        val qtyForPacks = if (packs >= packSpec.remainingCount) {
+                            item.currentQuantity
+                        } else {
+                            (packs * packSpec.avgWeightPerPack).coerceAtMost(item.currentQuantity)
+                        }
+                        val label = if (packs == 1) {
+                            packSpec.formatSinglePackAction()
+                        } else {
+                            "-$packs ${packSpec.packType.shortLabel}"
+                        }
+                        androidx.compose.material3.FilledTonalButton(
+                            onClick = {
+                                quantityText = String.format(Locale.US, "%.2f", qtyForPacks)
+                                errorMsg = null
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("stock_out_pack_$packs")
+                        ) {
+                            Text(label, maxLines = 1)
+                        }
+                    }
+                }
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),

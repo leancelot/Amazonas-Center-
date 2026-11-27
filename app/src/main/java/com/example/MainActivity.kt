@@ -59,6 +59,7 @@ import com.example.data.ChamberTempLogStore
 import com.example.data.ColdStorageRepository
 import com.example.data.FirestoreColdStorageRepository
 import com.example.data.LocalColdStorageRepository
+import com.example.data.ScaleReconciliationStore
 import com.example.domain.invoice.InvoiceAiExtractor
 import com.example.domain.invoice.InvoiceLocalExtractor
 import com.example.ui.auth.authStateFlow
@@ -220,6 +221,10 @@ private fun FrigStockShell(
         ChamberTempLogStore(context.applicationContext)
     }
 
+    val scaleReconciliationStore = remember(context) {
+        ScaleReconciliationStore(context.applicationContext)
+    }
+
     val repository: ColdStorageRepository = remember(sessionKey, chamberTempLogStore) {
         if (isLocalMode) {
             LocalColdStorageRepository(context.applicationContext, chamberTempLogStore)
@@ -235,12 +240,13 @@ private fun FrigStockShell(
         }
     }
 
-    val factory = remember(repository, chamberTempLogStore) {
+    val factory = remember(repository, chamberTempLogStore, scaleReconciliationStore) {
         FrigStockViewModelFactory(
             repository = repository,
             localExtractor = InvoiceLocalExtractor(),
             aiExtractor = InvoiceAiExtractor(),
             chamberTempLogStore = chamberTempLogStore,
+            scaleReconciliationStore = scaleReconciliationStore,
             appContext = context.applicationContext
         )
     }

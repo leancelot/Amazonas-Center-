@@ -14,6 +14,8 @@ import com.example.data.DateUtils
 import com.example.data.MeatType
 import com.example.data.MeasurementUnit
 import com.example.data.MovementType
+import com.example.data.ScaleReconciliationRecord
+import com.example.data.ScaleReconciliationStore
 import com.example.data.StockMovementEntity
 import com.example.data.TemperatureZone
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -91,27 +93,50 @@ data class ReportsUiState(
     val recentMovements: List<StockMovementEntity> = emptyList(),
     val recentTempLogs: List<ChamberTempLog> = emptyList(),
     val todayTempRoundsCount: Int = 0,
+    val scaleReconciliations: List<ScaleReconciliationRecord> = emptyList(),
     val activeItemsSnapshot: List<ColdStorageItemEntity> = emptyList(),
     val streamError: String? = null
 )
 
 class ReportsViewModel(
     private val repository: ColdStorageRepository,
-    private val chamberTempLogStore: ChamberTempLogStore? = null
+    private val chamberTempLogStore: ChamberTempLogStore? = null,
+    private val scaleReconciliationStore: ScaleReconciliationStore? = null
 ) : ViewModel() {
 
     private val _period = MutableStateFlow(ReportPeriod.DAYS_30)
     private val _stockGrouping = MutableStateFlow(ReportStockGrouping.MEAT_TYPE)
     private val emptyTempLogs = MutableStateFlow<List<ChamberTempLog>>(emptyList())
     private val tempLogsFlow: StateFlow<List<ChamberTempLog>> = chamberTempLogStore?.logs ?: emptyTempLogs
+    private val emptyReconciliations = MutableStateFlow<List<ScaleReconciliationRecord>>(emptyList())
+    private val reconciliationsFlow: StateFlow<List<ScaleReconciliationRecord>> =
+        scaleReconciliationStore?.records ?: emptyReconciliations
 
-    val uiState: StateFlow<ReportsUiState> = combine(
+    private val baseReportsFlow = combine(
         repository.activeItemsFefo,
         repository.allMovements,
         tempLogsFlow,
+        reconciliationsFlow
+    ) { activeItems, allMovements, tempLogs, reconciliations ->
+        ReportDataBundle(activeItems, allMovements, tempLogs, reconciliations)
+    }
+
+    private data class ReportDataBundle(
+        val activeItems: List<ColdStorageItemEntity>,
+        val allMovements: List<StockMovementEntity>,
+        val tempLogs: List<ChamberTempLog>,
+        val reconciliations: List<ScaleReconciliationRecord>
+    )
+
+    val uiState: StateFlow<ReportsUiState> = combine(
+        baseReportsFlow,
         _period,
         _stockGrouping
-    ) { activeItems, allMovements, tempLogs, period, grouping ->
+    ) { bundle, period, grouping ->
+        val activeItems = bundle.activeItems
+        val allMovements = bundle.allMovements
+        val tempLogs = bundle.tempLogs
+        val allReconciliations = bundle.reconciliations
         val cutoffMillis = period.days?.let { days ->
             System.currentTimeMillis() - (days.toLong() * 86_400_000L)
         } ?: 0L
@@ -199,6 +224,7 @@ class ReportsViewModel(
             .sortedByDescending { it.totalKg }
 
         val periodTempLogs = tempLogs.filter { it.recordedAtMillis >= cutoffMillis }
+        val periodReconciliations = allReconciliations.filter { it.recordedAtMillis >= cutoffMillis }
         val todayTempRounds = tempLogs.count { DateUtils.isToday(it.recordedAtMillis) }
 
         ReportsUiState(
@@ -219,6 +245,7 @@ class ReportsViewModel(
             recentMovements = periodMovements.take(30),
             recentTempLogs = periodTempLogs.take(15),
             todayTempRoundsCount = todayTempRounds,
+            scaleReconciliations = periodReconciliations.take(15),
             activeItemsSnapshot = activeItems
         )
     }.catch { error ->
@@ -286,6 +313,16 @@ class ReportsViewModel(
             sb.appendLine("DETALHAMENTO DE PERDAS:")
             state.lossReasons.forEach {
                 sb.appendLine("- ${it.movementType.displayName}: ${String.format(ptBr, "%.2f", it.totalKg)} kg (${it.count}x)")
+            }
+        }
+        if (state.scaleReconciliations.isNotEmpty()) {
+            sb.appendLine()
+            sb.appendLine("CONFERÊNCIAS DE BALANÇA (POR DIFERENÇA):")
+            state.scaleReconciliations.take(8).forEach { rec ->
+                sb.appendLine(
+                    "- ${rec.profileName}: balança ${String.format(ptBr, "%.2f", rec.scaleWeightKg)} kg vs " +
+                        "${String.format(ptBr, "%.2f", rec.expectedKg)} kg (${String.format(ptBr, "%.1f", rec.shrinkagePercent)}% quebra) em ${DateUtils.formatShortDate(rec.recordedAtMillis)}"
+                )
             }
         }
         if (state.recentTempLogs.isNotEmpty()) {
