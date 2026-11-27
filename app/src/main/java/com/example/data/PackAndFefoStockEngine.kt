@@ -11,6 +11,7 @@ enum class PackUnitType(
     val pluralLabel: String
 ) {
     CAIXA("cx", "Caixa", "Caixas"),
+    PACOTE("pct", "Pacote", "Pacotes"),
     PECA("pç", "Peça", "Peças");
 
     companion object {
@@ -28,20 +29,28 @@ data class PackSpec(
     val packType: PackUnitType,
     val avgWeightPerPack: Double
 ) {
-    fun formatSummary(unit: MeasurementUnit): String {
+    private fun formatAvgWeight(avgWeight: Double): String {
         val ptBr = Locale.forLanguageTag("pt-BR")
+        return if (avgWeight < 0.999) {
+            val grams = (avgWeight * 1000.0).roundToInt()
+            "~${grams}g"
+        } else {
+            "~${String.format(ptBr, "%.1f", avgWeight)} kg"
+        }
+    }
+
+    fun formatSummary(unit: MeasurementUnit): String {
         val typeWord = if (remainingCount == 1) packType.singularLabel.lowercase() else packType.pluralLabel.lowercase()
         return if (unit == MeasurementUnit.KG && avgWeightPerPack > 0.0) {
-            "$remainingCount $typeWord (~${String.format(ptBr, "%.1f", avgWeightPerPack)} kg/${packType.shortLabel})"
+            "$remainingCount $typeWord (${formatAvgWeight(avgWeightPerPack)}/${packType.shortLabel})"
         } else {
             "$remainingCount ${packType.shortLabel}"
         }
     }
 
     fun formatSinglePackAction(): String {
-        val ptBr = Locale.forLanguageTag("pt-BR")
         return if (avgWeightPerPack > 0.0) {
-            "-1 ${packType.shortLabel} (~${String.format(ptBr, "%.1f", avgWeightPerPack)} kg)"
+            "-1 ${packType.shortLabel} (${formatAvgWeight(avgWeightPerPack)})"
         } else {
             "-1 ${packType.shortLabel}"
         }
@@ -49,7 +58,7 @@ data class PackSpec(
 }
 
 object PackSpecHelper {
-    private val PACK_TAG_REGEX = Regex("""\[Vol:(\d+)\|(CAIXA|PECA)\|([0-9]+(?:\.[0-9]+)?)\]""")
+    private val PACK_TAG_REGEX = Regex("""\[Vol:(\d+)\|(CAIXA|PECA|PACOTE)\|([0-9]+(?:\.[0-9]+)?)\]""")
 
     fun parse(notes: String?): PackSpec? {
         if (notes.isNullOrBlank()) return null
@@ -110,6 +119,15 @@ object PackSpecHelper {
         val tag = buildTag(newRemainingPacks, existingSpec.packType, existingSpec.avgWeightPerPack)
         return combineNotesAndTag(cleanNotes, tag)
     }
+
+    fun estimatePortionCount(totalKg: Double, portionGrams: Int = 500): Int {
+        if (totalKg <= 0.0 || portionGrams <= 0) return 0
+        val portionKg = portionGrams / 1000.0
+        return (totalKg / portionKg).roundToInt().coerceAtLeast(1)
+    }
+
+    fun parseBoxWeightsSum(weights: List<Double>): Double =
+        weights.filter { it > 0.0 }.sum()
 
     private fun buildTag(count: Int, packType: PackUnitType, avgWeight: Double): String {
         val formattedAvg = String.format(Locale.US, "%.2f", avgWeight.coerceAtLeast(0.0))

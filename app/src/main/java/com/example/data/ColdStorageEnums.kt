@@ -30,7 +30,7 @@ enum class MeatType(
         defaultChilledDays = 4,
         defaultFrozenDays = 90,
         presetCuts = listOf(
-            "Peito de Frango", "Filé de Peito", "Coxa e Sobrecoxa",
+            "Coxinha da Asa", "Peito de Frango", "Filé de Peito", "Coxa e Sobrecoxa",
             "Sobrecoxa", "Asa", "Meio da Asa (Tulipa)", "Sassami", "Frango Inteiro"
         )
     ),
@@ -114,10 +114,11 @@ enum class TemperatureZone(
         val defaultChambers: List<String> = listOf(
             "Resfriado",
             "Congelado",
-            "Bairro de Fátima",
             "Maturação",
             "Balcão Refrigerado"
         )
+
+        const val BAIRRO_DE_FATIMA_SUPPLIER = "Unidade Bairro de Fátima"
     }
 }
 
@@ -199,6 +200,11 @@ enum class MovementType(
 
     companion object {
         val outgoingTypes: List<MovementType> = entries.filter { it.isOutgoing }
+        val standardOutgoingTypes: List<MovementType> = listOf(
+            SAIDA_BALCAO,
+            SAIDA_DESOSSA,
+            AJUSTE
+        )
 
         fun fromRaw(raw: String?): MovementType {
             return entries.firstOrNull { it.name.equals(raw?.trim(), ignoreCase = true) }

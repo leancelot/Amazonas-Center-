@@ -84,7 +84,7 @@ fun StockOutSheet(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                MovementType.outgoingTypes.forEach { type ->
+                MovementType.standardOutgoingTypes.forEach { type ->
                     FilterChip(
                         selected = selectedType == type,
                         onClick = { selectedType = type },
@@ -176,7 +176,6 @@ fun StockOutSheet(
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            val isLoss = selectedType.isLoss
             Button(
                 onClick = {
                     val parsed = quantityText.replace(',', '.').toDoubleOrNull()
@@ -192,18 +191,13 @@ fun StockOutSheet(
                         }
                     }
                 },
-                colors = if (isLoss) {
-                    ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                } else {
-                    ButtonDefaults.buttonColors()
-                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(52.dp)
                     .testTag("confirm_stock_out_button")
             ) {
                 Text(
-                    text = if (isLoss) "Registrar Perda / Descarte" else "Confirmar Baixa",
+                    text = "Confirmar Baixa",
                     style = MaterialTheme.typography.titleMedium
                 )
             }

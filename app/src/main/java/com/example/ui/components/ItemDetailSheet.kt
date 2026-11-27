@@ -189,7 +189,7 @@ fun ItemDetailSheet(
                             OutlinedTextField(
                                 value = newChamber,
                                 onValueChange = { newChamber = it },
-                                label = { Text("Câmara / Unidade de destino") },
+                                label = { Text("Câmara na loja") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )

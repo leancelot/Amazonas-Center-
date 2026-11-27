@@ -33,7 +33,6 @@ import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.NotificationsOff
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Save
-import androidx.compose.material.icons.rounded.Scale
 import androidx.compose.material.icons.rounded.Thermostat
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Button
@@ -88,7 +87,6 @@ import com.example.ui.components.LocalBackupSheet
 import com.example.ui.components.MeatTypePill
 import com.example.ui.components.QuickCutStockOutSheet
 import com.example.ui.components.ReceivingSessionDetailSheet
-import com.example.ui.components.ScaleDifferenceAdjustmentSheet
 import com.example.ui.components.StockOutSheet
 import com.example.ui.components.TemperatureZonePill
 import com.example.ui.components.ThermalComplianceBadge
@@ -130,7 +128,6 @@ fun DashboardScreen(
     var showBackupSheet by remember { mutableStateOf(false) }
     var showQuickCutSheet by remember { mutableStateOf(false) }
     var showFastClosureSheet by remember { mutableStateOf(false) }
-    var showScaleDifferenceSheet by remember { mutableStateOf(false) }
     var alertSettings by remember(context) {
         mutableStateOf(ExpiryNotificationManager.readSettings(context))
     }
@@ -257,10 +254,8 @@ fun DashboardScreen(
                     isLocalMode = isLocalMode,
                     backupSummary = state.backupSummary,
                     canEditStock = state.activeRole.canEditReceivingOrStock && state.activeItems.isNotEmpty(),
-                    dueReconciliationCount = state.dueReconciliationCount,
                     onOpenQuickCutStockOut = { showQuickCutSheet = true },
                     onOpenFastClosure = { showFastClosureSheet = true },
-                    onOpenScaleDifference = { showScaleDifferenceSheet = true },
                     onOpenChamberTemp = { showChamberTempSheet = true },
                     onOpenExpiryAlerts = { showExpiryAlertsSheet = true },
                     onOpenLocalBackup = { showBackupSheet = true }
@@ -370,7 +365,11 @@ fun DashboardScreen(
                                 )
                                 Text(
                                     text = buildString {
-                                        if (session.invoiceNumber.isNotBlank()) append("NF ${session.invoiceNumber} • ")
+                                        if (session.invoiceNumber.isNotBlank()) {
+                                            append("NF ${session.invoiceNumber} • ")
+                                        } else {
+                                            append("Transferência S/ NF • ")
+                                        }
                                         append("${session.itemCount} corte(s)")
                                         if (session.totalKg > 0.0) {
                                             append(" (${String.format(ptBr, "%.1f", session.totalKg)} kg)")
@@ -511,22 +510,6 @@ fun DashboardScreen(
             }
         )
     }
-
-    if (showScaleDifferenceSheet) {
-        ScaleDifferenceAdjustmentSheet(
-            activeItems = state.activeItems,
-            profiles = state.reconciliationProfiles,
-            records = state.reconciliationRecords,
-            allMovements = state.allMovements,
-            onDismiss = { showScaleDifferenceSheet = false },
-            onApplyDifference = { plan ->
-                viewModel.applyScaleDifferencePlan(plan)
-                showScaleDifferenceSheet = false
-            },
-            onSaveProfile = viewModel::saveReconciliationProfile,
-            onDeleteProfile = viewModel::deleteReconciliationProfile
-        )
-    }
 }
 
 @Composable
@@ -538,10 +521,8 @@ private fun DailyOperationalToolsSection(
     isLocalMode: Boolean,
     backupSummary: BackupRestoreSummary?,
     canEditStock: Boolean,
-    dueReconciliationCount: Int,
     onOpenQuickCutStockOut: () -> Unit,
     onOpenFastClosure: () -> Unit,
-    onOpenScaleDifference: () -> Unit,
     onOpenChamberTemp: () -> Unit,
     onOpenExpiryAlerts: () -> Unit,
     onOpenLocalBackup: () -> Unit
@@ -630,77 +611,6 @@ private fun DailyOperationalToolsSection(
                             )
                         }
                     }
-                }
-            }
-
-            OutlinedCard(
-                onClick = onOpenScaleDifference,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("dashboard_scale_difference_card")
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.secondaryContainer,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.size(44.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Rounded.Scale,
-                                contentDescription = "Ajuste de estoque por diferença",
-                                tint = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                        }
-                    }
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text(
-                                text = "Ajuste por Diferença (Balança)",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                            if (dueReconciliationCount > 0) {
-                                Surface(
-                                    color = MaterialTheme.colorScheme.errorContainer,
-                                    shape = RoundedCornerShape(999.dp)
-                                ) {
-                                    Text(
-                                        text = "$dueReconciliationCount pendente(s)",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onErrorContainer,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                    )
-                                }
-                            }
-                        }
-                        Text(
-                            text = "Informe o peso atual na balança e calcule a quebra (Friesul ~7d, Bairro de Fátima ~1d).",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    Text(
-                        text = "Conferir",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Bold
-                    )
                 }
             }
         }

@@ -279,9 +279,7 @@ class ReportsViewModel(
         sb.appendLine("----------------------------------------")
         val otherSuffix = if (state.totalStockOtherUnits > 0) " + ${state.totalStockOtherUnits} pç/cx" else ""
         sb.appendLine("Estoque Atual: ${String.format(ptBr, "%.2f", state.totalStockKg)} kg$otherSuffix (${state.totalActiveLots} lotes)")
-        sb.appendLine("Saídas p/ Balcão/Desossa: ${String.format(ptBr, "%.2f", state.totalOutgoingKg)} kg")
-        sb.appendLine("Perdas no Período: ${String.format(ptBr, "%.2f", state.totalLossKg)} kg (${DateUtils.formatCurrencyBrl(state.totalLossBrl)})")
-        sb.appendLine("Índice de Quebra: ${String.format(ptBr, "%.1f", state.lossRatePercent)}%")
+        sb.appendLine("Saídas no Período: ${String.format(ptBr, "%.2f", state.totalOutgoingKg)} kg")
         if (state.zoneBreakdown.isNotEmpty()) {
             sb.appendLine()
             sb.appendLine("POR ARMAZENAMENTO:")
@@ -296,7 +294,7 @@ class ReportsViewModel(
         }
         if (state.supplierBreakdown.isNotEmpty()) {
             sb.appendLine()
-            sb.appendLine("ESTOQUE POR FRIGORÍFICO:")
+            sb.appendLine("ESTOQUE POR FRIGORÍFICO / ORIGEM:")
             state.supplierBreakdown.forEach {
                 sb.appendLine("- ${it.supplierName}: ${String.format(ptBr, "%.2f", it.totalKg)} kg (${it.lotCount} lotes)")
             }
@@ -306,23 +304,6 @@ class ReportsViewModel(
             sb.appendLine("ESTOQUE POR VALIDADE (FEFO):")
             state.expiryBreakdown.forEach {
                 sb.appendLine("- ${it.label}: ${String.format(ptBr, "%.2f", it.totalKg)} kg (${it.lotCount} lotes)")
-            }
-        }
-        if (state.lossReasons.isNotEmpty()) {
-            sb.appendLine()
-            sb.appendLine("DETALHAMENTO DE PERDAS:")
-            state.lossReasons.forEach {
-                sb.appendLine("- ${it.movementType.displayName}: ${String.format(ptBr, "%.2f", it.totalKg)} kg (${it.count}x)")
-            }
-        }
-        if (state.scaleReconciliations.isNotEmpty()) {
-            sb.appendLine()
-            sb.appendLine("CONFERÊNCIAS DE BALANÇA (POR DIFERENÇA):")
-            state.scaleReconciliations.take(8).forEach { rec ->
-                sb.appendLine(
-                    "- ${rec.profileName}: balança ${String.format(ptBr, "%.2f", rec.scaleWeightKg)} kg vs " +
-                        "${String.format(ptBr, "%.2f", rec.expectedKg)} kg (${String.format(ptBr, "%.1f", rec.shrinkagePercent)}% quebra) em ${DateUtils.formatShortDate(rec.recordedAtMillis)}"
-                )
             }
         }
         if (state.recentTempLogs.isNotEmpty()) {

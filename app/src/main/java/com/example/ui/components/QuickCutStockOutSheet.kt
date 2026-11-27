@@ -336,14 +336,7 @@ private fun QuickCutDeductionStep(
     onConfirm: (MovementType, List<FefoLotAllocation>, String) -> Unit
 ) {
     val ptBr = Locale.forLanguageTag("pt-BR")
-    val quickMovementTypes = remember {
-        listOf(
-            MovementType.SAIDA_BALCAO,
-            MovementType.SAIDA_DESOSSA,
-            MovementType.PERDA_APARA,
-            MovementType.AJUSTE
-        )
-    }
+    val quickMovementTypes = MovementType.standardOutgoingTypes
 
     var movementType by remember(group.key) { mutableStateOf(MovementType.SAIDA_BALCAO) }
     var selectedPackCount by remember(group.key) {
@@ -630,11 +623,6 @@ private fun QuickCutDeductionStep(
                         onConfirm(movementType, plannedAllocations, autoReason)
                     }
                 }
-            },
-            colors = if (movementType.isLoss) {
-                ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-            } else {
-                ButtonDefaults.buttonColors()
             },
             modifier = Modifier
                 .fillMaxWidth()

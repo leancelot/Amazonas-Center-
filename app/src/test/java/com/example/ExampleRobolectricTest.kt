@@ -578,6 +578,80 @@ class ExampleRobolectricTest {
         }
     }
 
+    @Test
+    fun `bairro de fatima internal transfer saves without NF and derives session thermal status from items`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = LocalColdStorageRepository(context)
+        repository.clearAllLocalData()
+
+        val viewModel = ReceivingViewModel(
+            repository = repository,
+            localExtractor = InvoiceLocalExtractor(),
+            aiExtractor = InvoiceAiExtractor()
+        )
+
+        viewModel.setInternalTransferMode(true)
+        assertTrue(viewModel.formState.value.isInternalTransfer)
+        assertEquals(TemperatureZone.BAIRRO_DE_FATIMA_SUPPLIER, viewModel.formState.value.supplierName)
+        assertEquals("", viewModel.formState.value.invoiceNumber)
+
+        viewModel.addQuickEntryItem(
+            supplier = viewModel.formState.value.supplierName,
+            invoiceNum = "9999", // should be ignored in internal transfer mode
+            responsible = "Leandro",
+            meatType = MeatType.AVES,
+            cutName = "Coxinha da Asa",
+            zone = TemperatureZone.RESFRIADO,
+            tempCelsius = 2.0,
+            quantity = 10.0,
+            unit = MeasurementUnit.KG,
+            batch = "BF-01",
+            expiryEpochDay = DateUtils.addDaysToTodayEpochDay(4),
+            packCount = 20,
+            packUnit = PackUnitType.PACOTE,
+            notes = "2 cx somadas (5,0 + 5,0 kg)",
+            isInternalTransfer = true
+        )
+        viewModel.addQuickEntryItem(
+            supplier = viewModel.formState.value.supplierName,
+            invoiceNum = "",
+            responsible = "Leandro",
+            meatType = MeatType.AVES,
+            cutName = "Peito de Frango",
+            zone = TemperatureZone.RESFRIADO,
+            tempCelsius = 8.5, // Critical for RESFRIADO
+            quantity = 5.0,
+            unit = MeasurementUnit.KG,
+            batch = "BF-02",
+            expiryEpochDay = DateUtils.addDaysToTodayEpochDay(4),
+            packCount = 10,
+            packUnit = PackUnitType.PACOTE,
+            isInternalTransfer = true
+        )
+
+        viewModel.confirmAndSaveSession()
+
+        val deadline = System.currentTimeMillis() + 5_000L
+        while (repository.sessionSummaries.first().isEmpty() && System.currentTimeMillis() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+        }
+
+        val session = repository.sessionSummaries.first().single()
+        assertEquals("", session.invoiceNumber)
+        assertEquals(TemperatureZone.BAIRRO_DE_FATIMA_SUPPLIER, session.supplierName)
+        assertEquals(5.25, session.measuredTempCelsius, 0.05)
+        assertEquals(ThermalCompliance.CRITICO.name, session.thermalStatus)
+
+        val savedItems = repository.activeItemsFefo.first()
+        assertEquals(2, savedItems.size)
+        val coxinha = savedItems.first { it.cutName == "Coxinha da Asa" }
+        val packSpec = PackSpecHelper.parse(coxinha.notes)!!
+        assertEquals(20, packSpec.remainingCount)
+        assertEquals(PackUnitType.PACOTE, packSpec.packType)
+        assertEquals("20 pacotes (~500g/pct)", packSpec.formatSummary(MeasurementUnit.KG))
+    }
+
     private fun <T> StateFlow<T>.awaitMatching(
         timeoutMs: Long = 5_000L,
         predicate: (T) -> Boolean

@@ -70,6 +70,7 @@ data class ReceivingFormState(
     val targetZone: TemperatureZone = TemperatureZone.RESFRIADO,
     val responsibleName: String = "",
     val sourceType: InvoiceSourceType = InvoiceSourceType.MANUAL,
+    val isInternalTransfer: Boolean = false,
     val notes: String = "",
     val items: List<ParsedInvoiceItemDraft> = emptyList(),
     val isSaving: Boolean = false
@@ -147,6 +148,30 @@ class ReceivingViewModel(
     fun updateSupplierCnpj(value: String) = _formState.update { it.copy(supplierCnpj = value) }
     fun updateResponsibleName(value: String) = _formState.update { it.copy(responsibleName = value) }
     fun updateNotes(value: String) = _formState.update { it.copy(notes = value) }
+
+    fun setInternalTransferMode(enabled: Boolean) {
+        _formState.update { current ->
+            if (enabled) {
+                current.copy(
+                    isInternalTransfer = true,
+                    supplierName = TemperatureZone.BAIRRO_DE_FATIMA_SUPPLIER,
+                    invoiceNumber = "",
+                    accessKey = "",
+                    supplierCnpj = ""
+                )
+            } else {
+                val clearedSupplier = if (current.supplierName.equals(TemperatureZone.BAIRRO_DE_FATIMA_SUPPLIER, ignoreCase = true)) {
+                    ""
+                } else {
+                    current.supplierName
+                }
+                current.copy(
+                    isInternalTransfer = false,
+                    supplierName = clearedSupplier
+                )
+            }
+        }
+    }
 
     fun updateMeasuredTemp(value: String) {
         val sanitized = sanitizeTemperatureInput(value)
@@ -675,10 +700,27 @@ class ReceivingViewModel(
             )
             return
         }
-        val temp = state.parsedTempCelsius ?: state.targetZone.defaultTempCelsius
-        val supplier = state.supplierName.trim().ifBlank { "Fornecedor não informado" }
-        val nf = state.invoiceNumber.trim()
-        val compliance = ThermalCompliance.evaluate(state.targetZone, temp)
+        val primaryZone = state.items.firstOrNull()?.temperatureZone ?: state.targetZone
+        val temp = if (state.items.isNotEmpty()) {
+            state.items.map { it.measuredTempCelsius }.average()
+        } else {
+            state.parsedTempCelsius ?: state.targetZone.defaultTempCelsius
+        }
+        val supplier = when {
+            state.supplierName.isNotBlank() -> state.supplierName.trim()
+            state.isInternalTransfer -> TemperatureZone.BAIRRO_DE_FATIMA_SUPPLIER
+            else -> "Fornecedor não informado"
+        }
+        val nf = if (state.isInternalTransfer) "" else state.invoiceNumber.trim()
+        val compliance = state.items
+            .map { ThermalCompliance.evaluate(it.temperatureZone, it.measuredTempCelsius) }
+            .maxByOrNull {
+                when (it) {
+                    ThermalCompliance.CONFORME -> 0
+                    ThermalCompliance.ATENCAO -> 1
+                    ThermalCompliance.CRITICO -> 2
+                }
+            } ?: ThermalCompliance.evaluate(primaryZone, temp)
         val now = System.currentTimeMillis()
         val defaultResponsible = state.responsibleName.trim().ifBlank {
             sessionState.value.currentMember?.displayName.orEmpty()
@@ -701,12 +743,12 @@ class ReceivingViewModel(
 
                 val session = ReceivingSessionEntity(
                     invoiceNumber = nf,
-                    accessKey = state.accessKey.trim(),
+                    accessKey = if (state.isInternalTransfer) "" else state.accessKey.trim(),
                     supplierName = supplier,
-                    supplierCnpj = state.supplierCnpj.trim(),
+                    supplierCnpj = if (state.isInternalTransfer) "" else state.supplierCnpj.trim(),
                     receivedAtMillis = now,
                     measuredTempCelsius = temp,
-                    targetZone = state.targetZone.name,
+                    targetZone = primaryZone.name,
                     thermalStatus = compliance.name,
                     responsibleName = defaultResponsible,
                     sourceType = state.sourceType.name,
@@ -987,7 +1029,9 @@ class ReceivingViewModel(
         batch: String,
         expiryEpochDay: Long,
         packCount: Int = 0,
-        packUnit: PackUnitType = PackUnitType.CAIXA
+        packUnit: PackUnitType = PackUnitType.CAIXA,
+        notes: String = "",
+        isInternalTransfer: Boolean = false
     ) {
         val resolvedCut = cutName.trim().ifBlank { meatType.displayName }
         _formState.update { current ->
@@ -1002,13 +1046,15 @@ class ReceivingViewModel(
                 unit = unit,
                 batchCode = batch,
                 expiryEpochDay = expiryEpochDay,
+                notes = notes.trim(),
                 packCount = packCount.coerceAtLeast(0),
                 packUnit = packUnit
             )
             current.copy(
                 supplierName = supplier.ifBlank { current.supplierName },
-                invoiceNumber = invoiceNum.ifBlank { current.invoiceNumber },
+                invoiceNumber = if (isInternalTransfer || current.isInternalTransfer) "" else invoiceNum.ifBlank { current.invoiceNumber },
                 responsibleName = responsible.ifBlank { current.responsibleName },
+                isInternalTransfer = isInternalTransfer || current.isInternalTransfer,
                 targetZone = zone,
                 measuredTempText = String.format(Locale.US, "%.1f", tempCelsius),
                 items = current.items + newItem

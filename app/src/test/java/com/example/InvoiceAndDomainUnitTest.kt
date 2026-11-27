@@ -10,6 +10,7 @@ import com.example.data.MeatType
 import com.example.data.MeasurementUnit
 import com.example.data.MovementType
 import com.example.data.PackSpecHelper
+import com.example.data.PackUnitType
 import com.example.data.ReceivingSessionEntity
 import com.example.data.ReceivingSessionSummary
 import com.example.data.ShopInfo
@@ -385,6 +386,33 @@ class InvoiceAndDomainUnitTest {
 
         viewModel.removeParkedEntry(viewModel.pendingQueue.value.first().id)
         assertTrue(viewModel.pendingQueue.value.isEmpty())
+    }
+
+    @Test
+    fun `pack unit pacote formats sub-1kg portions in grams, sums box weights, and standard outgoing excludes losses`() {
+        assertEquals(20, PackSpecHelper.estimatePortionCount(10.0, 500))
+        assertEquals(10.0, PackSpecHelper.parseBoxWeightsSum(listOf(5.0, 5.0)), 0.01)
+
+        val notes = PackSpecHelper.applyPackMetadata(
+            userNotes = "2 cx somadas",
+            packCount = 20,
+            packType = PackUnitType.PACOTE,
+            totalQuantity = 10.0,
+            unit = MeasurementUnit.KG
+        )
+        val parsed = PackSpecHelper.parse(notes)!!
+        assertEquals(20, parsed.remainingCount)
+        assertEquals(PackUnitType.PACOTE, parsed.packType)
+        assertEquals(0.5, parsed.avgWeightPerPack, 0.01)
+        assertEquals("20 pacotes (~500g/pct)", parsed.formatSummary(MeasurementUnit.KG))
+        assertEquals("-1 pct (~500g)", parsed.formatSinglePackAction())
+
+        assertTrue(MovementType.standardOutgoingTypes.none { it.isLoss })
+        assertEquals(
+            listOf(MovementType.SAIDA_BALCAO, MovementType.SAIDA_DESOSSA, MovementType.AJUSTE),
+            MovementType.standardOutgoingTypes
+        )
+        assertFalse(TemperatureZone.defaultChambers.contains("Bairro de Fátima"))
     }
 
     private class FakeColdStorageRepository : ColdStorageRepository {

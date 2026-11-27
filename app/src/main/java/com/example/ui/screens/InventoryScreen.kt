@@ -22,7 +22,6 @@ import androidx.compose.material.icons.rounded.ArrowOutward
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.FactCheck
-import androidx.compose.material.icons.rounded.Scale
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -64,7 +63,6 @@ import com.example.ui.components.FastStockClosureSheet
 import com.example.ui.components.ItemDetailSheet
 import com.example.ui.components.MeatTypePill
 import com.example.ui.components.QuickCutStockOutSheet
-import com.example.ui.components.ScaleDifferenceAdjustmentSheet
 import com.example.ui.components.StockOutSheet
 import com.example.ui.components.TemperatureZonePill
 import com.example.ui.theme.JetBrainsMonoFamily
@@ -83,7 +81,6 @@ fun InventoryScreen(
     var stockOutItem by remember { mutableStateOf<ColdStorageItemEntity?>(null) }
     var showQuickCutSheet by remember { mutableStateOf(false) }
     var showFastClosureSheet by remember { mutableStateOf(false) }
-    var showScaleDifferenceSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(state.feedbackMessage) {
         state.feedbackMessage?.let { msg ->
@@ -129,43 +126,31 @@ fun InventoryScreen(
                 if (state.activeRole.canEditReceivingOrStock && state.activeItems.isNotEmpty()) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Button(
                             onClick = { showQuickCutSheet = true },
-                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp),
                             modifier = Modifier
                                 .weight(1f)
                                 .height(48.dp)
                                 .testTag("inventory_quick_cut_stock_out_button")
                         ) {
-                            Icon(Icons.Rounded.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Saída", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Icon(Icons.Rounded.Bolt, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Saída Rápida", maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         FilledTonalButton(
                             onClick = { showFastClosureSheet = true },
-                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp),
                             modifier = Modifier
                                 .weight(1f)
                                 .height(48.dp)
                                 .testTag("inventory_fast_closure_button")
                         ) {
-                            Icon(Icons.Rounded.FactCheck, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Sobra", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                        OutlinedButton(
-                            onClick = { showScaleDifferenceSheet = true },
-                            contentPadding = PaddingValues(horizontal = 8.dp),
-                            modifier = Modifier
-                                .weight(1.1f)
-                                .height(48.dp)
-                                .testTag("inventory_scale_difference_button")
-                        ) {
-                            Icon(Icons.Rounded.Scale, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Diferença", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Icon(Icons.Rounded.FactCheck, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Fechamento", maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
@@ -358,22 +343,6 @@ fun InventoryScreen(
                 viewModel.applyFastStockClosure(plan)
                 showFastClosureSheet = false
             }
-        )
-    }
-
-    if (showScaleDifferenceSheet) {
-        ScaleDifferenceAdjustmentSheet(
-            activeItems = state.activeItems,
-            profiles = state.reconciliationProfiles,
-            records = state.reconciliationRecords,
-            allMovements = state.allMovements,
-            onDismiss = { showScaleDifferenceSheet = false },
-            onApplyDifference = { plan ->
-                viewModel.applyScaleDifferencePlan(plan)
-                showScaleDifferenceSheet = false
-            },
-            onSaveProfile = viewModel::saveReconciliationProfile,
-            onDeleteProfile = viewModel::deleteReconciliationProfile
         )
     }
 }

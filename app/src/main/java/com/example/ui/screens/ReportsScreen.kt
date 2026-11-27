@@ -71,7 +71,7 @@ fun ReportsScreen(
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Relatórios de Estoque & Perdas",
+                        text = "Relatórios de Estoque",
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold
                     )
@@ -103,11 +103,10 @@ fun ReportsScreen(
                         modifier = Modifier.weight(1f)
                     )
                     ReportKpiCard(
-                        title = "Perdas (${state.period.label})",
-                        value = String.format(ptBr, "%.1f kg", state.totalLossKg),
-                        subtitle = "${String.format(ptBr, "%.1f", state.lossRatePercent)}% quebra • " +
-                            DateUtils.formatCurrencyBrl(state.totalLossBrl),
-                        isError = state.totalLossKg > 0.0,
+                        title = "Saídas (${state.period.label})",
+                        value = String.format(ptBr, "%.1f kg", state.totalOutgoingKg),
+                        subtitle = "Balcão, desossa e ajustes",
+                        isError = false,
                         modifier = Modifier.weight(1f)
                     )
                 }
@@ -290,144 +289,6 @@ fun ReportsScreen(
                 }
             }
 
-            if (state.lossReasons.isNotEmpty()) {
-                item {
-                    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = "Perdas por Motivo",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            state.lossReasons.forEach { loss ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        text = "${loss.movementType.displayName} (${loss.count}x)",
-                                        style = MaterialTheme.typography.bodyMedium
-                                    )
-                                    Text(
-                                        text = "${String.format(Locale.forLanguageTag("pt-BR"), "%.2f", loss.totalKg)} kg",
-                                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = JetBrainsMonoFamily),
-                                        color = MaterialTheme.colorScheme.error,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (state.scaleReconciliations.isNotEmpty()) {
-                item {
-                    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = "Conferências de Balança (Quebra Apurada)",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            val ptBr = Locale.forLanguageTag("pt-BR")
-                            state.scaleReconciliations.take(6).forEach { rec ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = rec.profileName,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                        Text(
-                                            text = "Balança ${String.format(ptBr, "%.1f", rec.scaleWeightKg)} kg vs ${String.format(ptBr, "%.1f", rec.expectedKg)} kg • ${DateUtils.formatShortDate(rec.recordedAtMillis)}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    val diffText = when {
-                                        rec.differenceKg > 0.001 -> "-${String.format(ptBr, "%.2f", rec.differenceKg)} kg (${String.format(ptBr, "%.1f", rec.shrinkagePercent)}%)"
-                                        rec.differenceKg < -0.001 -> "+${String.format(ptBr, "%.2f", kotlin.math.abs(rec.differenceKg))} kg"
-                                        else -> "0% quebra"
-                                    }
-                                    Text(
-                                        text = diffText,
-                                        style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (rec.differenceKg > 0.001) {
-                                            MaterialTheme.colorScheme.error
-                                        } else {
-                                            MaterialTheme.colorScheme.primary
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (state.scaleReconciliations.isNotEmpty()) {
-                item {
-                    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = "Conferências de Balança (Quebra)",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            val ptBr = Locale.forLanguageTag("pt-BR")
-                            state.scaleReconciliations.take(5).forEach { rec ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = rec.profileName,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                        Text(
-                                            text = "Balança ${String.format(ptBr, "%.1f", rec.scaleWeightKg)} kg vs ${String.format(ptBr, "%.1f", rec.expectedKg)} kg • ${DateUtils.formatShortDate(rec.recordedAtMillis)}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    Text(
-                                        text = when {
-                                            rec.differenceKg > 0.001 -> "-${String.format(ptBr, "%.2f", rec.differenceKg)} kg (${String.format(ptBr, "%.1f", rec.shrinkagePercent)}%)"
-                                            rec.differenceKg < -0.001 -> "+${String.format(ptBr, "%.2f", kotlin.math.abs(rec.differenceKg))} kg"
-                                            else -> "0% quebra"
-                                        },
-                                        style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (rec.differenceKg > 0.001) {
-                                            MaterialTheme.colorScheme.error
-                                        } else {
-                                            MaterialTheme.colorScheme.primary
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
 
             if (state.recentTempLogs.isNotEmpty()) {
                 item {

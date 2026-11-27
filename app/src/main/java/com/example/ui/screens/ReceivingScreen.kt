@@ -95,6 +95,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.ColdStorageItemEntity
 import com.example.data.DateUtils
+import com.example.data.PackSpec
+import com.example.data.PackSpecHelper
 import com.example.data.ReceivingSessionSummary
 import com.example.data.TemperatureZone
 import com.example.data.PackUnitType
@@ -114,7 +116,7 @@ import com.example.ui.viewmodel.ParkedReceivingDraft
 import com.example.ui.viewmodel.ReceivingViewModel
 import java.io.File
 import java.util.Locale
-import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -149,6 +151,8 @@ fun ReceivingScreen(
     var qUnit by remember { mutableStateOf(com.example.data.MeasurementUnit.KG) }
     var qPackCountText by remember { mutableStateOf("") }
     var qPackUnit by remember { mutableStateOf(PackUnitType.CAIXA) }
+    var qBoxWeightInput by remember { mutableStateOf("") }
+    var qBoxWeights by remember { mutableStateOf<List<Double>>(emptyList()) }
     var qBatch by remember { mutableStateOf("") }
     var qExpiryEpochDay by remember { mutableLongStateOf(DateUtils.addDaysToTodayEpochDay(7)) }
     var qShowDateDialog by remember { mutableStateOf(false) }
@@ -167,6 +171,8 @@ fun ReceivingScreen(
             qCutName = ""
             qQtyText = ""
             qPackCountText = ""
+            qBoxWeightInput = ""
+            qBoxWeights = emptyList()
             qBatch = ""
             qErrorMsg = null
         }
@@ -237,6 +243,12 @@ fun ReceivingScreen(
         }
     }
 
+    fun buildBoxWeightsNote(): String {
+        if (qBoxWeights.isEmpty()) return ""
+        val ptBr = Locale.forLanguageTag("pt-BR")
+        return "${qBoxWeights.size} cx somadas (${qBoxWeights.joinToString(" + ") { String.format(ptBr, "%.1f", it) }} kg)"
+    }
+
     fun commitPendingQuickItemIfEntered(): Boolean {
         val qty = qQtyText.replace(',', '.').toDoubleOrNull()
         val temp = qTempText.replace(',', '.').toDoubleOrNull() ?: qZone.defaultTempCelsius
@@ -259,10 +271,14 @@ fun ReceivingScreen(
                 batch = qBatch.trim(),
                 expiryEpochDay = qExpiryEpochDay,
                 packCount = packs,
-                packUnit = qPackUnit
+                packUnit = qPackUnit,
+                notes = buildBoxWeightsNote(),
+                isInternalTransfer = formState.isInternalTransfer
             )
             qQtyText = ""
             qPackCountText = ""
+            qBoxWeightInput = ""
+            qBoxWeights = emptyList()
             qBatch = ""
             qCutName = ""
             return true
@@ -274,6 +290,8 @@ fun ReceivingScreen(
         qCutName = ""
         qQtyText = ""
         qPackCountText = ""
+        qBoxWeightInput = ""
+        qBoxWeights = emptyList()
         qBatch = ""
         qErrorMsg = null
     }
@@ -404,87 +422,153 @@ fun ReceivingScreen(
                                     ) {
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
-                                                text = "Entrega na Portaria • Perguntas Rápidas",
+                                                text = "Lançamento Rápido de Entrada",
                                                 style = MaterialTheme.typography.titleMedium,
                                                 fontWeight = FontWeight.Bold,
                                                 color = MaterialTheme.colorScheme.primary
                                             )
                                             Text(
-                                                text = "Pese na balança, confira a temperatura e libere o motorista.",
+                                                text = if (formState.isInternalTransfer) {
+                                                    "Transferência Unidade Bairro de Fátima → Morada de Laranjeiras (Sem NF)."
+                                                } else {
+                                                    "Some as caixas ou informe a NF e confira a temperatura do produto."
+                                                },
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
                                         }
-                                        OutlinedButton(
-                                            onClick = onOpenBarcodeScanner,
-                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                            modifier = Modifier.testTag("quick_scan_danfe_button")
-                                        ) {
-                                            Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
-                                            Spacer(Modifier.width(4.dp))
-                                            Text("QR/NF")
+                                        if (!formState.isInternalTransfer) {
+                                            OutlinedButton(
+                                                onClick = onOpenBarcodeScanner,
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                                modifier = Modifier.testTag("quick_scan_danfe_button")
+                                            ) {
+                                                Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("QR/NF")
+                                            }
                                         }
                                     }
 
-                                    Text("1. Nº da nota e quem recebeu?", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                                    Text("1. Origem do recebimento", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
-                                        OutlinedTextField(
-                                            value = formState.invoiceNumber,
-                                            onValueChange = {
-                                                viewModel.updateInvoiceNumber(it)
+                                        FilterChip(
+                                            selected = !formState.isInternalTransfer,
+                                            onClick = {
+                                                viewModel.setInternalTransferMode(false)
                                                 qErrorMsg = null
                                             },
-                                            label = { Text("Nº da NF *") },
-                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                            singleLine = true,
+                                            label = { Text("Fornecedor (c/ NF)") },
                                             modifier = Modifier
                                                 .weight(1f)
-                                                .testTag("quick_nf_input")
+                                                .testTag("origin_supplier_chip")
                                         )
+                                        FilterChip(
+                                            selected = formState.isInternalTransfer,
+                                            onClick = {
+                                                viewModel.setInternalTransferMode(true)
+                                                qPackUnit = PackUnitType.PACOTE
+                                                qErrorMsg = null
+                                            },
+                                            label = { Text("Bairro de Fátima (Sem NF)") },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("origin_bairro_fatima_chip")
+                                        )
+                                    }
+
+                                    if (formState.isInternalTransfer) {
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                                            shape = MaterialTheme.shapes.small,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text(
+                                                text = "Fornecimento interno: Unidade Bairro de Fátima → Morada de Laranjeiras. Sem NF: some as caixas e lance os pacotes porcionados (~500g).",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                modifier = Modifier.padding(10.dp)
+                                            )
+                                        }
                                         OutlinedTextField(
                                             value = formState.responsibleName,
                                             onValueChange = {
                                                 viewModel.updateResponsibleName(it)
                                                 qErrorMsg = null
                                             },
-                                            label = { Text("Responsável *") },
+                                            label = { Text("Responsável pelo recebimento *") },
                                             singleLine = true,
                                             modifier = Modifier
-                                                .weight(1.2f)
+                                                .fillMaxWidth()
                                                 .testTag("quick_responsible_input")
                                         )
-                                    }
+                                    } else {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            OutlinedTextField(
+                                                value = formState.invoiceNumber,
+                                                onValueChange = {
+                                                    viewModel.updateInvoiceNumber(it)
+                                                    qErrorMsg = null
+                                                },
+                                                label = { Text("Nº da NF *") },
+                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("quick_nf_input")
+                                            )
+                                            OutlinedTextField(
+                                                value = formState.responsibleName,
+                                                onValueChange = {
+                                                    viewModel.updateResponsibleName(it)
+                                                    qErrorMsg = null
+                                                },
+                                                label = { Text("Responsável *") },
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .weight(1.2f)
+                                                    .testTag("quick_responsible_input")
+                                            )
+                                        }
 
-                                    OutlinedTextField(
-                                        value = formState.supplierName,
-                                        onValueChange = {
-                                            viewModel.updateSupplierName(it)
-                                            qErrorMsg = null
-                                        },
-                                        label = { Text("Frigorífico / Fornecedor (opcional agora)") },
-                                        singleLine = true,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("quick_supplier_input")
-                                    )
+                                        OutlinedTextField(
+                                            value = formState.supplierName,
+                                            onValueChange = {
+                                                viewModel.updateSupplierName(it)
+                                                qErrorMsg = null
+                                            },
+                                            label = { Text("Frigorífico / Fornecedor (opcional agora)") },
+                                            singleLine = true,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("quick_supplier_input")
+                                        )
 
-                                    val recentSuppliers = remember(pastSessions) {
-                                        pastSessions.map { it.supplierName }
-                                            .filter { it.isNotBlank() && it != "Fornecedor não informado" }
-                                            .distinct()
-                                            .take(4)
-                                    }
-                                    if (recentSuppliers.isNotEmpty() && formState.supplierName.isBlank()) {
-                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            recentSuppliers.forEach { sup ->
-                                                FilterChip(
-                                                    selected = false,
-                                                    onClick = { viewModel.updateSupplierName(sup) },
-                                                    label = { Text(sup) }
-                                                )
+                                        val recentSuppliers = remember(pastSessions) {
+                                            pastSessions.map { it.supplierName }
+                                                .filter {
+                                                    it.isNotBlank() &&
+                                                        it != "Fornecedor não informado" &&
+                                                        !it.equals(TemperatureZone.BAIRRO_DE_FATIMA_SUPPLIER, ignoreCase = true)
+                                                }
+                                                .distinct()
+                                                .take(4)
+                                        }
+                                        if (recentSuppliers.isNotEmpty() && formState.supplierName.isBlank()) {
+                                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                recentSuppliers.forEach { sup ->
+                                                    FilterChip(
+                                                        selected = false,
+                                                        onClick = { viewModel.updateSupplierName(sup) },
+                                                        label = { Text(sup) }
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -540,7 +624,7 @@ fun ReceivingScreen(
                                         }
                                     }
 
-                                    Text("3. Produto resfriado ou congelado? Qual a temperatura?", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                                    Text("3. Armazenamento e temperatura do produto", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -570,7 +654,7 @@ fun ReceivingScreen(
                                         OutlinedTextField(
                                             value = qTempText,
                                             onValueChange = { qTempText = ReceivingViewModel.sanitizeTemperatureInput(it) },
-                                            label = { Text("Temp. chegada (°C) *") },
+                                            label = { Text("Temp. do produto (°C) *") },
                                             trailingIcon = {
                                                 TextButton(onClick = { qTempText = ReceivingViewModel.toggleTemperatureSign(qTempText) }) {
                                                     Text("±", fontWeight = FontWeight.Bold)
@@ -608,7 +692,7 @@ fun ReceivingScreen(
                                         }
                                     }
 
-                                    Text("4. Peso da balança, lote e validade", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                                    Text("4. Peso (ou soma das caixas), porções e validade", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -617,7 +701,7 @@ fun ReceivingScreen(
                                         OutlinedTextField(
                                             value = qQtyText,
                                             onValueChange = { qQtyText = it; qErrorMsg = null },
-                                            label = { Text("Peso balança / Qtd *") },
+                                            label = { Text("Peso total / Qtd *") },
                                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                             singleLine = true,
                                             modifier = Modifier
@@ -639,6 +723,73 @@ fun ReceivingScreen(
                                     }
 
                                     if (qUnit == com.example.data.MeasurementUnit.KG) {
+                                        val ptBr = Locale.forLanguageTag("pt-BR")
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            OutlinedTextField(
+                                                value = qBoxWeightInput,
+                                                onValueChange = { qBoxWeightInput = it },
+                                                label = { Text("Somar caixa (kg)") },
+                                                placeholder = { Text("Ex.: 5.0") },
+                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("quick_box_weight_input")
+                                            )
+                                            FilledTonalButton(
+                                                onClick = {
+                                                    val boxW = qBoxWeightInput.replace(',', '.').toDoubleOrNull()
+                                                    if (boxW != null && boxW > 0.0) {
+                                                        val updatedBoxes = qBoxWeights + boxW
+                                                        qBoxWeights = updatedBoxes
+                                                        qQtyText = String.format(
+                                                            Locale.US,
+                                                            "%.2f",
+                                                            PackSpecHelper.parseBoxWeightsSum(updatedBoxes)
+                                                        )
+                                                        qBoxWeightInput = ""
+                                                        qErrorMsg = null
+                                                    } else {
+                                                        qErrorMsg = "Informe o peso da caixa para somar."
+                                                    }
+                                                },
+                                                modifier = Modifier
+                                                    .height(48.dp)
+                                                    .testTag("quick_add_box_button")
+                                            ) {
+                                                Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("+ Caixa")
+                                            }
+                                        }
+
+                                        if (qBoxWeights.isNotEmpty()) {
+                                            FlowRow(
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                qBoxWeights.forEachIndexed { idx, weight ->
+                                                    FilterChip(
+                                                        selected = true,
+                                                        onClick = {
+                                                            val nextBoxes = qBoxWeights.toMutableList().apply { removeAt(idx) }
+                                                            qBoxWeights = nextBoxes
+                                                            qQtyText = if (nextBoxes.isEmpty()) {
+                                                                ""
+                                                            } else {
+                                                                String.format(Locale.US, "%.2f", PackSpecHelper.parseBoxWeightsSum(nextBoxes))
+                                                            }
+                                                        },
+                                                        label = { Text("Cx ${idx + 1}: ${String.format(ptBr, "%.1f", weight)} kg ×") }
+                                                    )
+                                                }
+                                            }
+                                        }
+
                                         val qParsedQty = qQtyText.replace(',', '.').toDoubleOrNull() ?: 0.0
                                         val qParsedPacks = qPackCountText.toIntOrNull() ?: 0
                                         Row(
@@ -649,8 +800,8 @@ fun ReceivingScreen(
                                             OutlinedTextField(
                                                 value = qPackCountText,
                                                 onValueChange = { raw -> qPackCountText = raw.filter { it.isDigit() }.take(4) },
-                                                label = { Text("Volumes (cx/pç opc.)") },
-                                                placeholder = { Text("Ex.: 3") },
+                                                label = { Text("Volumes (${qPackUnit.shortLabel} opc.)") },
+                                                placeholder = { Text("Ex.: 20") },
                                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                                 singleLine = true,
                                                 modifier = Modifier
@@ -658,7 +809,7 @@ fun ReceivingScreen(
                                                     .testTag("quick_pack_count_input")
                                             )
                                             FlowRow(
-                                                modifier = Modifier.weight(1f),
+                                                modifier = Modifier.weight(1.15f),
                                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                                             ) {
                                                 PackUnitType.entries.forEach { pType ->
@@ -670,8 +821,30 @@ fun ReceivingScreen(
                                                 }
                                             }
                                         }
-                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            listOf(1, 2, 3, 5, 10).forEach { presetPacks ->
+                                        FlowRow(
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            if (qParsedQty > 0.0) {
+                                                val suggested500 = PackSpecHelper.estimatePortionCount(qParsedQty, 500)
+                                                FilterChip(
+                                                    selected = qPackUnit == PackUnitType.PACOTE && qParsedPacks == suggested500,
+                                                    onClick = {
+                                                        qPackUnit = PackUnitType.PACOTE
+                                                        qPackCountText = suggested500.toString()
+                                                    },
+                                                    label = { Text("Porções ~500g ($suggested500 pct)") },
+                                                    modifier = Modifier.testTag("quick_portion_500g_chip")
+                                                )
+                                            } else if (qPackUnit == PackUnitType.PACOTE && qParsedPacks > 0) {
+                                                val weightFromPacks = qParsedPacks * 0.5
+                                                FilterChip(
+                                                    selected = false,
+                                                    onClick = { qQtyText = String.format(Locale.US, "%.2f", weightFromPacks) },
+                                                    label = { Text("Calc. ${String.format(ptBr, "%.1f", weightFromPacks)} kg (${qParsedPacks} × 500g)") }
+                                                )
+                                            }
+                                            listOf(1, 2, 5, 10, 20).forEach { presetPacks ->
                                                 FilterChip(
                                                     selected = qParsedPacks == presetPacks,
                                                     onClick = { qPackCountText = presetPacks.toString() },
@@ -688,8 +861,13 @@ fun ReceivingScreen(
                                         }
                                         if (qParsedQty > 0.0 && qParsedPacks > 0) {
                                             val avgPackKg = qParsedQty / qParsedPacks.toDouble()
+                                            val avgLabel = if (avgPackKg < 0.999) {
+                                                "~${(avgPackKg * 1000.0).roundToInt()}g"
+                                            } else {
+                                                "~${String.format(ptBr, "%.1f", avgPackKg)} kg"
+                                            }
                                             Text(
-                                                text = "Média de saída: ~${String.format(Locale.forLanguageTag("pt-BR"), "%.1f", avgPackKg)} kg/${qPackUnit.shortLabel} (baixa em 1 toque)",
+                                                text = "Média por volume: $avgLabel/${qPackUnit.shortLabel} (baixa rápida em 1 toque)",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.secondary
                                             )
@@ -788,7 +966,7 @@ fun ReceivingScreen(
                                             val qty = qQtyText.replace(',', '.').toDoubleOrNull()
                                             val temp = qTempText.replace(',', '.').toDoubleOrNull() ?: qZone.defaultTempCelsius
                                             when {
-                                                qty == null || qty <= 0.0 -> qErrorMsg = "Informe o peso da balança ou quantidade para adicionar."
+                                                qty == null || qty <= 0.0 -> qErrorMsg = "Informe o peso ou some as caixas para adicionar."
                                                 else -> {
                                                     val packs = if (qUnit == com.example.data.MeasurementUnit.KG) {
                                                         qPackCountText.toIntOrNull()?.coerceAtLeast(0) ?: 0
@@ -808,10 +986,14 @@ fun ReceivingScreen(
                                                         batch = qBatch.trim(),
                                                         expiryEpochDay = qExpiryEpochDay,
                                                         packCount = packs,
-                                                        packUnit = qPackUnit
+                                                        packUnit = qPackUnit,
+                                                        notes = buildBoxWeightsNote(),
+                                                        isInternalTransfer = formState.isInternalTransfer
                                                     )
                                                     qQtyText = ""
                                                     qPackCountText = ""
+                                                    qBoxWeightInput = ""
+                                                    qBoxWeights = emptyList()
                                                     qBatch = ""
                                                     qCutName = ""
                                                     Toast.makeText(context, "Corte adicionado! Informe o próximo da entrega.", Toast.LENGTH_SHORT).show()
@@ -834,12 +1016,20 @@ fun ReceivingScreen(
                                             val hasExistingItems = formState.items.isNotEmpty()
                                             val resolvedNf = formState.invoiceNumber.trim()
                                             when {
-                                                resolvedNf.isBlank() -> qErrorMsg = "Informe o número da nota (NF)."
+                                                !formState.isInternalTransfer && resolvedNf.isBlank() -> qErrorMsg = "Informe o número da nota (NF) ou marque Bairro de Fátima."
                                                 formState.responsibleName.isBlank() -> qErrorMsg = "Informe o responsável pelo recebimento."
-                                                !hasExistingItems && (qty == null || qty <= 0.0) -> qErrorMsg = "Informe o peso da balança ou quantidade."
+                                                !hasExistingItems && (qty == null || qty <= 0.0) -> qErrorMsg = "Informe o peso total ou some as caixas."
                                                 else -> {
                                                     commitPendingQuickItemIfEntered()
-                                                    Toast.makeText(context, "Entregador liberado! Complete o lançamento da nota.", Toast.LENGTH_LONG).show()
+                                                    Toast.makeText(
+                                                        context,
+                                                        if (formState.isInternalTransfer) {
+                                                            "Lotes prontos! Revise e confirme a entrada."
+                                                        } else {
+                                                            "Entregador liberado! Complete o lançamento da nota."
+                                                        },
+                                                        Toast.LENGTH_LONG
+                                                    ).show()
                                                     quickStep = 1
                                                 }
                                             }
@@ -851,7 +1041,13 @@ fun ReceivingScreen(
                                     ) {
                                         Icon(Icons.Rounded.CheckCircle, contentDescription = null)
                                         Spacer(Modifier.width(8.dp))
-                                        Text("Liberar Entregador & Ir p/ Lançamento")
+                                        Text(
+                                            if (formState.isInternalTransfer) {
+                                                "Revisar Lotes & Finalizar"
+                                            } else {
+                                                "Liberar Entregador & Ir p/ Lançamento"
+                                            }
+                                        )
                                     }
 
                                     Row(
@@ -864,7 +1060,7 @@ fun ReceivingScreen(
                                                 val hasItems = formState.items.isNotEmpty() || (qty != null && qty > 0.0)
                                                 val resolvedNf = formState.invoiceNumber.trim()
                                                 if (!hasItems && resolvedNf.isBlank() && formState.supplierName.isBlank()) {
-                                                    qErrorMsg = "Preencha ao menos NF, fornecedor ou produto antes de colocar na fila."
+                                                    qErrorMsg = "Preencha ao menos produto, NF ou fornecedor antes de colocar na fila."
                                                     return@OutlinedButton
                                                 }
                                                 commitPendingQuickItemIfEntered()
@@ -919,7 +1115,11 @@ fun ReceivingScreen(
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Text(
-                                        text = "Entrada registrada (${formState.items.size} lote(s) • NF ${formState.invoiceNumber.ifBlank { "—" }}). Anexe a nota ou revise os lotes abaixo.",
+                                        text = if (formState.isInternalTransfer) {
+                                            "Transferência Unidade Bairro de Fátima (${formState.items.size} lote(s) • Sem NF). Revise os lotes abaixo ou adicione mais cortes."
+                                        } else {
+                                            "Entrada registrada (${formState.items.size} lote(s) • NF ${formState.invoiceNumber.ifBlank { "—" }}). Anexe a nota ou revise os lotes abaixo."
+                                        },
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSecondaryContainer,
                                         modifier = Modifier.padding(12.dp)
@@ -937,111 +1137,113 @@ fun ReceivingScreen(
                             )
                         }
 
-                        item {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(
-                                    text = "Leitura Automática da Nota Fiscal",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold
-                                )
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    FilterChip(
-                                        selected = useFastCloudAi,
-                                        onClick = { useFastCloudAi = true },
-                                        leadingIcon = {
-                                            Icon(Icons.Rounded.Bolt, contentDescription = null, modifier = Modifier.size(18.dp))
-                                        },
-                                        label = { Text("IA Rápida (Nuvem)", fontWeight = FontWeight.SemiBold) },
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("mode_fast_cloud_ai")
+                        if (!formState.isInternalTransfer) {
+                            item {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(
+                                        text = "Leitura Automática da Nota Fiscal",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
                                     )
-                                    FilterChip(
-                                        selected = !useFastCloudAi,
-                                        onClick = { useFastCloudAi = false },
-                                        leadingIcon = {
-                                            Icon(Icons.Rounded.WifiOff, contentDescription = null, modifier = Modifier.size(18.dp))
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        FilterChip(
+                                            selected = useFastCloudAi,
+                                            onClick = { useFastCloudAi = true },
+                                            leadingIcon = {
+                                                Icon(Icons.Rounded.Bolt, contentDescription = null, modifier = Modifier.size(18.dp))
+                                            },
+                                            label = { Text("IA Rápida (Nuvem)", fontWeight = FontWeight.SemiBold) },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("mode_fast_cloud_ai")
+                                        )
+                                        FilterChip(
+                                            selected = !useFastCloudAi,
+                                            onClick = { useFastCloudAi = false },
+                                            leadingIcon = {
+                                                Icon(Icons.Rounded.WifiOff, contentDescription = null, modifier = Modifier.size(18.dp))
+                                            },
+                                            label = { Text("100% Offline", fontWeight = FontWeight.SemiBold) },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("mode_offline_ocr")
+                                        )
+                                    }
+
+                                    Text(
+                                        text = if (useFastCloudAi) {
+                                            "Modo IA Rápida: lê o texto no celular e estrutura tudo na nuvem em poucos segundos."
+                                        } else {
+                                            "Modo Offline: reconhece DANFE no aparelho sem gastar internet."
                                         },
-                                        label = { Text("100% Offline", fontWeight = FontWeight.SemiBold) },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        InvoiceActionTile(
+                                            icon = Icons.Rounded.CameraAlt,
+                                            title = "Tirar Foto",
+                                            subtitle = if (useFastCloudAi) "IA Rápida" else "OCR Local",
+                                            onClick = ::launchCameraDirect,
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("action_invoice_camera")
+                                        )
+                                        InvoiceActionTile(
+                                            icon = Icons.Rounded.PhotoLibrary,
+                                            title = "Galeria",
+                                            subtitle = if (useFastCloudAi) "IA Rápida" else "OCR Local",
+                                            onClick = {
+                                                galleryLauncher.launch(
+                                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                                )
+                                            },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("action_invoice_gallery")
+                                        )
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        InvoiceActionTile(
+                                            icon = Icons.Rounded.PictureAsPdf,
+                                            title = "PDF Nota",
+                                            subtitle = if (useFastCloudAi) "IA Rápida" else "OCR Local",
+                                            onClick = { pdfLauncher.launch(arrayOf("application/pdf")) },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("action_invoice_pdf_ai")
+                                        )
+                                        InvoiceActionTile(
+                                            icon = Icons.Rounded.Code,
+                                            title = "XML NF-e",
+                                            subtitle = "100% Exato",
+                                            onClick = { xmlLauncher.launch(arrayOf("text/xml", "application/xml", "*/*")) },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("action_invoice_xml")
+                                        )
+                                    }
+                                    InvoiceActionTile(
+                                        icon = Icons.Rounded.QrCodeScanner,
+                                        title = "Ler QR / Código de Barras DANFE (44 dígitos)",
+                                        subtitle = "Preenche nº da NF, série e CNPJ do fornecedor",
+                                        onClick = onOpenBarcodeScanner,
                                         modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("mode_offline_ocr")
+                                            .fillMaxWidth()
+                                            .testTag("action_invoice_qr")
                                     )
                                 }
-
-                                Text(
-                                    text = if (useFastCloudAi) {
-                                        "Modo IA Rápida: lê o texto no celular e estrutura tudo na nuvem em poucos segundos."
-                                    } else {
-                                        "Modo Offline: reconhece DANFE no aparelho sem gastar internet."
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    InvoiceActionTile(
-                                        icon = Icons.Rounded.CameraAlt,
-                                        title = "Tirar Foto",
-                                        subtitle = if (useFastCloudAi) "IA Rápida" else "OCR Local",
-                                        onClick = ::launchCameraDirect,
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("action_invoice_camera")
-                                    )
-                                    InvoiceActionTile(
-                                        icon = Icons.Rounded.PhotoLibrary,
-                                        title = "Galeria",
-                                        subtitle = if (useFastCloudAi) "IA Rápida" else "OCR Local",
-                                        onClick = {
-                                            galleryLauncher.launch(
-                                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                            )
-                                        },
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("action_invoice_gallery")
-                                    )
-                                }
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    InvoiceActionTile(
-                                        icon = Icons.Rounded.PictureAsPdf,
-                                        title = "PDF Nota",
-                                        subtitle = if (useFastCloudAi) "IA Rápida" else "OCR Local",
-                                        onClick = { pdfLauncher.launch(arrayOf("application/pdf")) },
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("action_invoice_pdf_ai")
-                                    )
-                                    InvoiceActionTile(
-                                        icon = Icons.Rounded.Code,
-                                        title = "XML NF-e",
-                                        subtitle = "100% Exato",
-                                        onClick = { xmlLauncher.launch(arrayOf("text/xml", "application/xml", "*/*")) },
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("action_invoice_xml")
-                                    )
-                                }
-                                InvoiceActionTile(
-                                    icon = Icons.Rounded.QrCodeScanner,
-                                    title = "Ler QR / Código de Barras DANFE (44 dígitos)",
-                                    subtitle = "Preenche nº da NF, série e CNPJ do fornecedor",
-                                    onClick = onOpenBarcodeScanner,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("action_invoice_qr")
-                                )
                             }
                         }
 
@@ -1054,121 +1256,70 @@ fun ReceivingScreen(
                                     verticalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
                                     Text(
-                                        text = "Dados da Sessão & Conferência Térmica",
+                                        text = "Dados da Entrega",
                                         style = MaterialTheme.typography.titleSmall,
                                         fontWeight = FontWeight.Bold
                                     )
 
-                                    OutlinedTextField(
-                                        value = formState.supplierName,
-                                        onValueChange = viewModel::updateSupplierName,
-                                        label = { Text("Fornecedor / Frigorífico") },
-                                        singleLine = true,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("session_supplier_input")
-                                    )
-
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        OutlinedTextField(
-                                            value = formState.invoiceNumber,
-                                            onValueChange = viewModel::updateInvoiceNumber,
-                                            label = { Text("Nº da NF") },
-                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                            singleLine = true,
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .testTag("session_nf_input")
-                                        )
+                                    if (formState.isInternalTransfer) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "Origem: Unidade Bairro de Fátima (Sem NF)",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            TextButton(onClick = { viewModel.setInternalTransferMode(false) }) {
+                                                Text("Usar NF")
+                                            }
+                                        }
                                         OutlinedTextField(
                                             value = formState.responsibleName,
                                             onValueChange = viewModel::updateResponsibleName,
                                             label = { Text("Conferente") },
                                             singleLine = true,
                                             modifier = Modifier
-                                                .weight(1.2f)
+                                                .fillMaxWidth()
                                                 .testTag("session_responsible_input")
                                         )
-                                    }
-
-                                    Text("Categoria & Temperatura Aferida", style = MaterialTheme.typography.labelLarge)
-                                    val sessionZones = if (formState.targetZone == TemperatureZone.MATURACAO) {
-                                        TemperatureZone.entries
                                     } else {
-                                        TemperatureZone.primaryZones
-                                    }
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        sessionZones.forEach { z ->
-                                            FilterChip(
-                                                selected = formState.targetZone == z,
-                                                onClick = { viewModel.updateTargetZone(z) },
-                                                label = { Text("${z.displayName} (${z.rangeLabel})") },
-                                                modifier = Modifier
-                                                    .weight(1f)
-                                                    .testTag("session_zone_${z.name.lowercase()}")
-                                            )
-                                        }
-                                    }
-
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
                                         OutlinedTextField(
-                                            value = formState.measuredTempText,
-                                            onValueChange = viewModel::updateMeasuredTemp,
-                                            label = { Text("Temp. chegada (°C)") },
-                                            trailingIcon = {
-                                                TextButton(
-                                                    onClick = {
-                                                        viewModel.updateMeasuredTemp(
-                                                            ReceivingViewModel.toggleTemperatureSign(formState.measuredTempText)
-                                                        )
-                                                    },
-                                                    modifier = Modifier.testTag("session_temp_sign_button")
-                                                ) {
-                                                    Text("±", fontWeight = FontWeight.Bold)
-                                                }
-                                            },
-                                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                                            value = formState.supplierName,
+                                            onValueChange = viewModel::updateSupplierName,
+                                            label = { Text("Fornecedor / Frigorífico") },
                                             singleLine = true,
                                             modifier = Modifier
-                                                .weight(1f)
-                                                .testTag("session_temp_input")
+                                                .fillMaxWidth()
+                                                .testTag("session_supplier_input")
                                         )
-                                        formState.thermalCompliance?.let { compliance ->
-                                            ThermalComplianceBadge(
-                                                compliance = compliance,
-                                                tempCelsius = formState.parsedTempCelsius,
-                                                showTempValue = false
-                                            )
-                                        }
-                                    }
 
-                                    val sessionTemp = formState.parsedTempCelsius
-                                    val divergentTemp = if (sessionTemp != null && formState.items.any { item ->
-                                            item.temperatureZone == formState.targetZone &&
-                                                abs(item.measuredTempCelsius - sessionTemp) >= 0.1
-                                        }
-                                    ) {
-                                        sessionTemp
-                                    } else {
-                                        null
-                                    }
-                                    if (divergentTemp != null) {
-                                        TextButton(
-                                            onClick = viewModel::syncAllItemsToSessionTemp,
-                                            modifier = Modifier.align(Alignment.End)
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
-                                            Text(
-                                                text = "Aplicar ${DateUtils.formatTemp(divergentTemp)} nos itens ${formState.targetZone.displayName}"
+                                            OutlinedTextField(
+                                                value = formState.invoiceNumber,
+                                                onValueChange = viewModel::updateInvoiceNumber,
+                                                label = { Text("Nº da NF") },
+                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("session_nf_input")
+                                            )
+                                            OutlinedTextField(
+                                                value = formState.responsibleName,
+                                                onValueChange = viewModel::updateResponsibleName,
+                                                label = { Text("Conferente") },
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .weight(1.2f)
+                                                    .testTag("session_responsible_input")
                                             )
                                         }
                                     }
@@ -1176,7 +1327,7 @@ fun ReceivingScreen(
                                     OutlinedTextField(
                                         value = formState.notes,
                                         onValueChange = viewModel::updateNotes,
-                                        label = { Text("Observações da nota / sanitárias (opcional)") },
+                                        label = { Text("Observações da entrega (opcional)") },
                                         minLines = 1,
                                         maxLines = 3,
                                         modifier = Modifier
@@ -1241,8 +1392,6 @@ fun ReceivingScreen(
                             items(formState.items, key = { it.localId }) { draftItem ->
                                 DraftItemCard(
                                     item = draftItem,
-                                    sessionTempCelsius = formState.parsedTempCelsius,
-                                    sessionZone = formState.targetZone,
                                     onEdit = {
                                         editingItem = draftItem
                                         showManualItemSheet = true
@@ -1346,7 +1495,11 @@ fun ReceivingScreen(
                                     val ptBr = Locale.forLanguageTag("pt-BR")
                                     Text(
                                         text = buildString {
-                                            if (session.invoiceNumber.isNotBlank()) append("NF ${session.invoiceNumber} • ")
+                                            if (session.invoiceNumber.isNotBlank()) {
+                                                append("NF ${session.invoiceNumber} • ")
+                                            } else {
+                                                append("Transferência S/ NF • ")
+                                            }
                                             append("${session.itemCount} itens")
                                             if (session.totalKg > 0) {
                                                 append(" (${String.format(ptBr, "%.1f", session.totalKg)} kg)")
@@ -1441,8 +1594,7 @@ fun ReceivingScreen(
     if (showManualItemSheet) {
         ManualItemSheet(
             initialItem = editingItem,
-            defaultZone = formState.targetZone,
-            sessionTempCelsius = if (editingItem == null) formState.parsedTempCelsius else null,
+            defaultZone = TemperatureZone.RESFRIADO,
             onDismiss = { showManualItemSheet = false },
             onSave = { item ->
                 viewModel.addOrUpdateDraftItem(item)
@@ -1547,15 +1699,9 @@ private fun InvoiceActionTile(
 @Composable
 private fun DraftItemCard(
     item: ParsedInvoiceItemDraft,
-    sessionTempCelsius: Double?,
-    sessionZone: TemperatureZone,
     onEdit: () -> Unit,
     onRemove: () -> Unit
 ) {
-    val hasDistinctTemp = item.temperatureZone != sessionZone ||
-        sessionTempCelsius == null ||
-        abs(item.measuredTempCelsius - sessionTempCelsius) >= 0.1
-
     Card(
         onClick = onEdit,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -1586,9 +1732,14 @@ private fun DraftItemCard(
                     Text(
                         text = buildString {
                             append(item.chamberName)
-                            if (hasDistinctTemp) append(" • ${DateUtils.formatTemp(item.measuredTempCelsius)}")
-                            if (item.packCount > 0 && item.unit == com.example.data.MeasurementUnit.KG) {
-                                append(" • ${item.packCount} ${item.packUnit.shortLabel}")
+                            append(" • ${DateUtils.formatTemp(item.measuredTempCelsius)}")
+                            if (item.packCount > 0 && item.unit == com.example.data.MeasurementUnit.KG && item.quantity > 0.0) {
+                                val packSummary = PackSpec(
+                                    remainingCount = item.packCount,
+                                    packType = item.packUnit,
+                                    avgWeightPerPack = item.quantity / item.packCount.toDouble()
+                                ).formatSummary(item.unit)
+                                append(" • $packSummary")
                             }
                             if (item.batchCode.isNotBlank()) append(" • Lote ${item.batchCode}")
                             if (item.sifCode.isNotBlank()) append(" • SIF ${item.sifCode}")
@@ -1664,7 +1815,11 @@ private fun PendingQueueSection(
                 )
             }
             queue.forEach { parked ->
-                val nfLabel = parked.form.invoiceNumber.ifBlank { "S/ NF" }
+                val nfLabel = if (parked.form.isInternalTransfer || parked.form.invoiceNumber.isBlank()) {
+                    "S/ NF"
+                } else {
+                    "NF ${parked.form.invoiceNumber}"
+                }
                 val supLabel = parked.form.supplierName.ifBlank { "Fornecedor pendente" }
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -1679,7 +1834,7 @@ private fun PendingQueueSection(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "NF $nfLabel • $supLabel",
+                                text = "$nfLabel • $supLabel",
                                 style = MaterialTheme.typography.labelLarge,
                                 fontWeight = FontWeight.Bold
                             )

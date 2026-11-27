@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import com.example.data.DateUtils
 import com.example.data.MeatType
 import com.example.data.MeasurementUnit
+import com.example.data.PackSpecHelper
 import com.example.data.PackUnitType
 import com.example.data.TemperatureZone
 import com.example.data.ThermalCompliance
@@ -101,7 +102,7 @@ fun ManualItemSheet(
     }
     var batchCode by remember { mutableStateOf(initialItem?.batchCode ?: "") }
     var sifCode by remember { mutableStateOf(initialItem?.sifCode ?: "") }
-    var notes by remember { mutableStateOf(initialItem?.notes ?: "") }
+    var notes by remember { mutableStateOf(PackSpecHelper.stripMetadata(initialItem?.notes)) }
     var packCountText by remember {
         mutableStateOf(if (initialItem != null && initialItem.packCount > 0) initialItem.packCount.toString() else "")
     }
@@ -199,7 +200,7 @@ fun ManualItemSheet(
                 }
             }
 
-            Text("Armazenamento (Câmara) & Temperatura", style = MaterialTheme.typography.titleSmall)
+            Text("Câmara & Temperatura do Produto", style = MaterialTheme.typography.titleSmall)
             val zoneOptions = if (zone == TemperatureZone.MATURACAO) {
                 TemperatureZone.entries
             } else {
@@ -220,12 +221,7 @@ fun ManualItemSheet(
                             if (chamberName.isBlank() || isGenericChamber) {
                                 chamberName = z.defaultChamber
                             }
-                            val nextTemp = if (initialItem == null && z == defaultZone && sessionTempCelsius != null) {
-                                sessionTempCelsius
-                            } else {
-                                z.defaultTempCelsius
-                            }
-                            tempText = String.format(Locale.US, "%.1f", nextTemp)
+                            tempText = String.format(Locale.US, "%.1f", z.defaultTempCelsius)
                             if (initialItem == null) {
                                 val days = if (z == TemperatureZone.CONGELADO) {
                                     meatType.defaultFrozenDays
@@ -259,8 +255,8 @@ fun ManualItemSheet(
             OutlinedTextField(
                 value = chamberName,
                 onValueChange = { chamberName = it },
-                label = { Text("Câmara / Unidade") },
-                placeholder = { Text("Ex.: Bairro de Fátima, Resfriado...") },
+                label = { Text("Câmara na loja") },
+                placeholder = { Text("Ex.: Resfriado, Congelado...") },
                 singleLine = true,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -348,7 +344,7 @@ fun ManualItemSheet(
                         value = packCountText,
                         onValueChange = { raw -> packCountText = raw.filter { it.isDigit() }.take(4) },
                         label = { Text("Qtd. volumes (opc.)") },
-                        placeholder = { Text("Ex.: 3") },
+                        placeholder = { Text("Ex.: 20") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         singleLine = true,
                         modifier = Modifier
@@ -356,7 +352,7 @@ fun ManualItemSheet(
                             .testTag("manual_pack_count_input")
                     )
                     FlowRow(
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1.2f),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         PackUnitType.entries.forEach { pType ->
@@ -368,10 +364,28 @@ fun ManualItemSheet(
                         }
                     }
                 }
+                if (parsedQty > 0.0) {
+                    val est500g = PackSpecHelper.estimatePortionCount(parsedQty, 500)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(
+                            selected = packUnit == PackUnitType.PACOTE && parsedPacks == est500g,
+                            onClick = {
+                                packUnit = PackUnitType.PACOTE
+                                packCountText = est500g.toString()
+                            },
+                            label = { Text("Porções ~500g ($est500g pct)") }
+                        )
+                    }
+                }
                 if (parsedQty > 0.0 && parsedPacks > 0) {
                     val avgKg = parsedQty / parsedPacks.toDouble()
+                    val avgLabel = if (avgKg < 0.999) {
+                        "~${(avgKg * 1000.0).toInt()}g/${packUnit.shortLabel}"
+                    } else {
+                        "~${String.format(Locale.forLanguageTag("pt-BR"), "%.1f", avgKg)} kg/${packUnit.shortLabel}"
+                    }
                     Text(
-                        text = "Peso médio calculado: ~${String.format(Locale.forLanguageTag("pt-BR"), "%.1f", avgKg)} kg/${packUnit.shortLabel} (habilita saída em 1 toque)",
+                        text = "Peso médio calculado: $avgLabel (habilita saída em 1 toque)",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.secondary
                     )
